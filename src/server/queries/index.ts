@@ -92,13 +92,15 @@ export async function listContacts() {
       budgetAmount: s.contacts.budgetAmount,
       budgetCurrency: s.contacts.budgetCurrency,
       ownerName: owner.name,
-      stage: s.opportunities.stage,
+      tags: s.contacts.tags,
+      // A contact can have several deals; show the most recent one's stage.
+      stage: sql<PipelineStage | null>`(select o.stage from opportunities o where o.contact_id = ${s.contacts.id} order by o.created_at desc limit 1)`,
+      opportunityCount: sql<number>`(select count(*)::int from opportunities o where o.contact_id = ${s.contacts.id})`,
       nextFollowUpAt: s.contacts.nextFollowUpAt,
       createdAt: s.contacts.createdAt,
     })
     .from(s.contacts)
     .leftJoin(owner, eq(owner.id, s.contacts.ownerId))
-    .leftJoin(s.opportunities, eq(s.opportunities.contactId, s.contacts.id))
     .orderBy(desc(s.contacts.createdAt));
 }
 
@@ -111,7 +113,7 @@ export async function getContactDetail(id: string) {
     .where(eq(s.contacts.id, id));
   if (!contact) return null;
 
-  const opps = await db.select().from(s.opportunities).where(eq(s.opportunities.contactId, id));
+  const opps = await db.select().from(s.opportunities).where(eq(s.opportunities.contactId, id)).orderBy(desc(s.opportunities.createdAt));
   const oppIds = opps.map((o) => o.id);
   const [history, appts, timeline, msgs, runs] = await Promise.all([
     oppIds.length
@@ -274,4 +276,17 @@ export async function checkDatabase(): Promise<{ ok: true; latencyMs: number } |
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "unknown database error" };
   }
+}
+
+export async function getContactForEdit(id: string) {
+  const [c] = await getDb().select().from(s.contacts).where(eq(s.contacts.id, id));
+  return c ?? null;
+}
+
+export async function listAssignableUsers() {
+  return getDb()
+    .select({ id: s.users.id, name: s.users.name, isAvailable: s.users.isAvailable })
+    .from(s.users)
+    .where(eq(s.users.role, "sales_rep"))
+    .orderBy(asc(s.users.name));
 }

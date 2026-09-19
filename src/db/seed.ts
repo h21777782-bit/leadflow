@@ -88,7 +88,7 @@ export async function seedDatabase(db: Database, now = new Date()): Promise<Seed
           country: lead.country,
           timezone: lead.timezone,
           ownerId,
-          tags: lead.tags,
+          tags: [...lead.tags, "demo-data"], // visible label: fictional seed record
           customFields: lead.customFields ?? {},
           notes: lead.notes,
           createdAt,

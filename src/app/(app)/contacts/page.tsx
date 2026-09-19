@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { connection } from "next/server";
-import { StageBadge } from "@/components/ui/badges";
+import { Badge, StageBadge } from "@/components/ui/badges";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { Table, Td, Th } from "@/components/ui/table";
@@ -20,7 +20,15 @@ export default async function ContactsPage() {
 
   return (
     <>
-      <PageHeader title="Contacts" description={`${rows.length} contacts. Each email and phone number can exist only once.`} />
+      <PageHeader
+        title="Contacts"
+        description={`${rows.length} contacts. Each email and phone number can exist only once. Contacts tagged demo-data are fictional seed records.`}
+        actions={
+          <Link href="/contacts/new" className="rounded-md bg-accent px-3 py-1.5 font-medium text-white hover:bg-accent/90">
+            Add contact
+          </Link>
+        }
+      />
       <div className="px-8 py-6">
         <Panel flush>
           {rows.length === 0 ? (
@@ -56,7 +64,11 @@ export default async function ContactsPage() {
                     <Td>{c.serviceInterest ? SERVICE_LABEL[c.serviceInterest as Service] ?? c.serviceInterest : "—"}</Td>
                     <Td className="tabular text-right">{formatMoney(c.budgetAmount, c.budgetCurrency)}</Td>
                     <Td>{c.ownerName ?? "Unassigned"}</Td>
-                    <Td><StageBadge stage={c.stage} /></Td>
+                    <Td>
+                      <StageBadge stage={c.stage} />
+                      {c.opportunityCount > 1 && <div className="mt-0.5 text-xs text-muted">{c.opportunityCount} deals</div>}
+                      {c.tags.includes("demo-data") && <div className="mt-0.5"><Badge>demo-data</Badge></div>}
+                    </Td>
                     <Td className="tabular whitespace-nowrap text-[13px]">{formatDateTime(c.nextFollowUpAt, tz, { dateStyle: "medium" })}</Td>
                   </tr>
                 ))}

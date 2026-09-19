@@ -5,6 +5,94 @@ Newest phase at the top.
 
 ---
 
+## Phase 2 — Contacts, duplicates, opportunities, stage changes, audit ✅
+
+**Date:** 2026-09-19
+**Verification (all passing):** `npm run verify` → typecheck ✓ · lint 0 warnings ✓ ·
+**58 tests** (7 files; 26 new: 13 validation/rule unit tests + 13 real-Postgres service tests) ·
+production build ✓ · **19/19 end-to-end HTTP checks** against the production server
+(real server actions, real database — see "How Phase 2 was verified").
+
+### Completed (database-backed, not UI-only)
+
+- **Contact creation** (`/contacts/new`): Zod validation (all errors in one round),
+  email/phone normalization, duplicate check, contact + optional New-lead
+  opportunity + initial stage-history row + audit entries in **one transaction**.
+- **Duplicate detection**: by normalized email and E.164 phone. Reports *which*
+  contact matched and on what (email / phone / both). If email matches one person
+  and phone matches another, both are reported and nothing is merged.
+  Race-safe: 5 concurrent identical submissions → exactly 1 contact (tested).
+- **"Update this contact instead"** (merge): non-empty values overwrite, empty values
+  never erase, tags unioned, custom fields merged, notes appended, owner only filled
+  if empty. Refuses if the details also match a third contact.
+- **Contact editing** (`/contacts/[id]/edit`): row-locked update, duplicate check
+  excluding itself, per-field change list in the audit log, "unchanged" when nothing
+  changed (no empty audit rows). Owner change → extra `owner.changed` audit entry
+  flagged as a manual override.
+- **Opportunity creation**: automatically with a new contact, or "Add another
+  opportunity" on the lead page (a contact can have several deals).
+- **Stage changes** — single code path `changeStage()` used by the Kanban board
+  (drag-and-drop + "Move to" menu for touch/keyboard) and the lead page:
+  - `SELECT … FOR UPDATE` row lock;
+  - optimistic-concurrency check (`expectedFromStage`) → a stale move returns a
+    conflict instead of overwriting someone else's move;
+  - rules: lost needs a reason; reopening a won/lost deal needs a reason and is
+    logged as `manual.override`; status/won_at/lost_at/lost_reason kept consistent;
+  - writes `stage_history` + `stage.changed` audit (+ `opportunity.won/lost`) in the same transaction.
+- **Audit writes** for: contact.created, contact.updated, contact.merged, owner.changed,
+  opportunity.created, stage.changed, opportunity.won, opportunity.lost, manual.override.
+- Demo labelling: every seeded contact now carries the visible tag **`demo-data`**
+  (shown as a badge in the contacts list); seeded failures still say `[demo seed]`.
+
+### Architectural decisions
+
+| Decision | Why |
+|---|---|
+| Business rules in `src/server/services`, server actions are thin wrappers | Same rules will be reused by webhooks (Phase 6) and automations (Phase 4). |
+| Pure rule modules (`lib/validation/contact.ts`, `lib/stage-rules.ts`) | Unit-testable without a database. |
+| Services return result objects (`created` / `duplicate` / `invalid` / `conflict`) instead of throwing | Expected outcomes are not errors; the UI can show exactly what happened. |
+| Unique-violation (SQLSTATE 23505) translated back into "duplicate" | The check-then-insert race becomes a normal answer, not a 500. |
+| Row lock + `expectedFromStage` for stage changes | Two people dragging the same card: one succeeds, the other is told to refresh (tested concurrently). |
+| Audit written inside the same transaction | The log can never describe a change that was rolled back. |
+| `useOptimistic` on the Kanban board | Card moves instantly; if the server refuses, React drops the optimistic state automatically. |
+| Acting user = `DEMO_ACTOR_EMAIL` (default seeded "Ops Admin") | **No login exists yet.** Documented limitation. |
+
+### Errors encountered and fixes
+
+1. **Validation reported errors in two rounds.** Zod skips `superRefine` when base
+   fields fail, so "email or phone required" only appeared after fixing other errors.
+   Caught by an integration test; `validateContact` now re-checks the cross-field rule.
+2. **Contacts list would duplicate rows** once a contact has 2+ opportunities (plain JOIN).
+   Replaced with a sub-query for the latest deal's stage plus a deal count.
+3. **No headless browser available in the sandbox** (Playwright download blocked).
+   Verified instead by submitting the real forms over HTTP exactly as a no-JavaScript
+   browser would (React's hidden action fields) and calling the Kanban server action
+   with its `Next-Action` id — then checking the database rows.
+
+### How Phase 2 was verified end-to-end (sandbox, production build)
+
+Create contact via form → 303 redirect, row with `+919890123456`, opportunity
+`new_lead:4200`, audit rows · duplicate (different case + phone format) → warning with the
+existing name, still 1 row · invalid form → both field errors shown · edit with owner
+change → `contact.updated` + `owner.changed` · Kanban action: move accepted, stale move
+→ conflict, lost without reason → rejected, lost with reason → accepted · stage history
+`new_lead,contacted,lost` · lead page, pipeline and activity log show the new data.
+
+### Known limitations after Phase 2
+
+- No authentication; all UI actions are attributed to the demo admin.
+- Drag-and-drop, the reason dialog, and optimistic rollback were **not exercised in a real
+  browser** (no browser in the sandbox). The server side of every move was tested.
+- The "Update this contact instead" button's server action is covered by service tests,
+  not by the HTTP end-to-end run.
+- Opportunity value/title editing and contact deletion are not built.
+- `last_contacted_at` / `next_follow_up_at` are not editable in the form; they will be set by
+  the follow-up automation (Phase 4).
+- New contacts are **not** auto-assigned or scored yet (Phases 3). No messages are sent,
+  no jobs run, and there is no HighLevel call — those systems do not exist yet.
+
+---
+
 ## Phase 1 — Foundation, database, demo data, read-only UI ✅
 
 **Date:** 2026-09-19
@@ -93,9 +181,8 @@ every page returned HTTP 200 from the production server · DB-outage test
 - `docker-compose.yml` and the Supabase CLI path were not executed in the sandbox
   (no Docker available); the app was tested against native PostgreSQL 16.
 
-### Remaining work
+### Remaining work (as of Phase 1 — Phase 2 is now done, see above)
 
-- Phase 2: contact create/edit, duplicate check flow, opportunity create, Kanban drag-drop, stage-change logging, audit writes.
 - Phase 3: routing + scoring engines (and scoring the seed leads).
 - Phase 4: job queue worker, workflow engine, follow-ups.
 - Phase 5: integration layer (Mock + HighLevel), retries/backoff/429.

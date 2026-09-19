@@ -11,15 +11,25 @@ import { formatDateTime, formatMoney } from "@/lib/format";
 import { fullName } from "@/lib/normalize";
 import { SERVICE_LABEL, SOURCE_LABEL, STAGE_META, type LeadSource, type Service } from "@/lib/pipeline";
 import { getContactDetail } from "@/server/queries";
+import { NewOpportunityForm } from "@/components/pipeline/new-opportunity-form";
+import { StageControl } from "@/components/pipeline/stage-control";
+import { isUuid } from "@/lib/ids";
 
 export const metadata: Metadata = { title: "Lead details" };
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const FLASH: Record<string, string> = {
+  created: "Contact created. No existing contact had this email or phone.",
+  updated: "Changes saved and recorded in the activity log.",
+  merged: "The new details were merged into this existing contact.",
+  unchanged: "Nothing changed, so nothing was saved.",
+};
 
-export default async function LeadDetailsPage({ params }: PageProps<"/contacts/[id]">) {
+export default async function LeadDetailsPage({ params, searchParams }: PageProps<"/contacts/[id]">) {
   await connection();
   const { id } = await params;
-  if (!UUID_RE.test(id)) notFound(); // avoid a Postgres cast error on bad ids
+  const sp = await searchParams;
+  const flashKey = Object.keys(FLASH).find((k) => sp[k] === "1");
+  if (!isUuid(id)) notFound(); // avoid a Postgres cast error on bad ids
   const data = await getContactDetail(id);
   if (!data) notFound();
 
@@ -50,8 +60,18 @@ export default async function LeadDetailsPage({ params }: PageProps<"/contacts/[
             {c.tags.map((t) => <Badge key={t}>{t}</Badge>)}
           </span>
         }
-        actions={<Link href="/contacts" className="text-[13px] font-medium text-accent hover:underline">All contacts</Link>}
+        actions={
+          <>
+            <Link href="/contacts" className="px-2 text-[13px] font-medium text-muted hover:text-ink">All contacts</Link>
+            <Link href={`/contacts/${c.id}/edit`} className="rounded-md border border-line-strong bg-surface px-3 py-1.5 text-[13px] font-medium hover:bg-canvas">Edit contact</Link>
+          </>
+        }
       />
+      {flashKey && (
+        <p role="status" className={`mx-8 mt-4 rounded-md px-3 py-2 ${flashKey === "unchanged" ? "bg-pending-soft text-pending" : "bg-ok-soft text-ok"}`}>
+          {FLASH[flashKey]}
+        </p>
+      )}
       <div className="grid gap-6 px-8 py-6 xl:grid-cols-3">
         <div className="space-y-6">
           <Panel title="Contact">
@@ -79,26 +99,36 @@ export default async function LeadDetailsPage({ params }: PageProps<"/contacts/[
             {c.notes && <p className="mt-5 rounded-md bg-canvas p-3 text-[13px]">{c.notes}</p>}
           </Panel>
 
-          {opp && (
-            <Panel title="Opportunity">
-              <p className="font-medium">{opp.title}</p>
-              <p className="tabular mt-1 text-2xl font-semibold">{formatMoney(opp.valueAmount, opp.currency)}</p>
-              <dl className="mt-3 space-y-1.5 text-[13px]">
-                <div><dt className="inline text-muted">Next action: </dt><dd className="inline">{opp.nextAction ?? "—"}</dd></div>
-                {opp.lostReason && <div><dt className="inline text-muted">Lost reason: </dt><dd className="inline">{opp.lostReason}</dd></div>}
-              </dl>
-              <h3 className="mt-5 text-[13px] font-medium text-muted">Stage history</h3>
-              <ol className="mt-2 space-y-2 border-l border-line pl-4">
-                {data.history.map((h) => (
-                  <li key={h.id} className="text-[13px]">
-                    <span className="font-medium">{STAGE_META[h.toStage].label}</span>
-                    <span className="text-muted"> — {formatDateTime(h.createdAt, tz)} by {h.actorType}</span>
-                    {h.reason && <div className="text-muted">{h.reason}</div>}
-                  </li>
-                ))}
-              </ol>
-            </Panel>
-          )}
+          <Panel title={data.opportunities.length > 1 ? `Opportunities (${data.opportunities.length})` : "Opportunity"}>
+            {data.opportunities.length === 0 && <p className="text-muted">No opportunity yet.</p>}
+            <div className="space-y-6">
+              {data.opportunities.map((o) => (
+                <div key={o.id}>
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-medium">{o.title}</p>
+                    <StageBadge stage={o.stage} />
+                  </div>
+                  <p className="tabular mt-1 text-2xl font-semibold">{formatMoney(o.valueAmount, o.currency)}</p>
+                  <dl className="mt-2 space-y-1 text-[13px]">
+                    {o.nextAction && <div><dt className="inline text-muted">Next action: </dt><dd className="inline">{o.nextAction}</dd></div>}
+                    {o.lostReason && <div><dt className="inline text-muted">Lost reason: </dt><dd className="inline">{o.lostReason}</dd></div>}
+                  </dl>
+                  <StageControl opportunityId={o.id} contactId={c.id} stage={o.stage} />
+                  <h3 className="mt-4 text-[13px] font-medium text-muted">Stage history</h3>
+                  <ol className="mt-2 space-y-2 border-l border-line pl-4">
+                    {data.history.filter((h) => h.opportunityId === o.id).map((h) => (
+                      <li key={h.id} className="text-[13px]">
+                        <span className="font-medium">{STAGE_META[h.toStage].label}</span>
+                        <span className="text-muted"> — {formatDateTime(h.createdAt, tz)} by {h.actorType}</span>
+                        {h.reason && <div className="text-muted">{h.reason}</div>}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              ))}
+              <NewOpportunityForm contactId={c.id} defaultTitle={`${c.company ?? c.firstName} — new project`} />
+            </div>
+          </Panel>
         </div>
 
         <div className="space-y-6 xl:col-span-2">

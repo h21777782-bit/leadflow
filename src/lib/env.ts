@@ -22,6 +22,8 @@ const envSchema = z
       }),
     APP_TIMEZONE: z.string().default("Asia/Kolkata"),
     DEFAULT_CURRENCY: z.string().length(3).default("USD"),
+    // No login in this demo: UI actions are attributed to this user (see server/services/actor.ts).
+    DEMO_ACTOR_EMAIL: z.email().default("admin@leadflow.example"),
 
     // Integration mode. MOCK_MODE=true keeps every external call inside the
     // isolated mock provider (added in Phase 5).

@@ -129,3 +129,136 @@ Exact commands: `DEMO_COMMANDS.md`।
 - *"Why is lead score a separate table?"* → History: I can see how a score changed over time and why (breakdown JSON), instead of one overwritten number.
 - *"Why integer money?"* → Floats can't represent many decimals exactly; integers avoid rounding errors.
 - *"Is there authentication?"* → Not in this local demo, and I say so. For production: Supabase Auth or similar, role checks for admin screens, and webhook routes protected by signatures instead of user sessions.
+
+---
+
+# Phase 2 — Contacts, duplicates, opportunities, stage changes, audit
+
+## 1. हमने क्या बनाया
+
+- **नया contact बनाना** (`/contacts/new`) — save से पहले duplicate check।
+- **Duplicate मिलने पर** साफ़ बताना कि कौन सा contact match हुआ और किस चीज़ पर (email/phone), और "इसी contact को update करो" का option।
+- **Contact edit** — हर बदले हुए field का record activity log में।
+- **Opportunity बनाना** — contact के साथ अपने आप, या lead page से "Add another opportunity"।
+- **Stage बदलना** — Pipeline पर drag-drop या "Move to" menu, और lead page से भी।
+- हर बदलाव पर **stage_history** और **audit_logs** में entry।
+
+ये सब **असली database में** save होता है। Test से यह साबित हुआ है।
+
+## 2. यह क्यों बनाया (और इस तरीके से क्यों)
+
+**Services layer (`src/server/services`):** सारे business rules यहीं हैं। Form, Kanban और आगे आने वाले webhooks व automations सब इन्हीं functions को call करेंगे। इसका फायदा यह है कि कोई भी रास्ता rules को bypass नहीं कर सकता। उदाहरण: stage बदलने का **सिर्फ एक** function है, `changeStage()`। इसलिए history और audit कभी छूट नहीं सकते।
+
+**Result objects, exceptions नहीं:** "Duplicate मिला" कोई error नहीं है, यह एक normal नतीजा है। इसलिए service `{status: "duplicate", matches}` return करती है, और UI ठीक वही दिखाता है।
+
+## 3. Data flow
+
+### नया contact
+```
+Form submit → createContactAction (server action)
+  → createContact() service
+      1. validateContact()     — सारे errors एक बार में
+      2. normalize             — email lowercase, phone → +91…
+      3. findDuplicates()      — email या phone match?
+         ├─ match → {duplicate} → form पर warning + "Update this contact instead"
+         └─ no match → TRANSACTION:
+               insert contact
+               audit: contact.created
+               insert opportunity (new_lead)
+               insert stage_history (null → new_lead)
+               audit: opportunity.created
+      4. अगर दो requests एक साथ आईं और DB ने unique index से दूसरी को रोका
+         → error पकड़ो → दोबारा findDuplicates → {duplicate, raceDetected}
+  → redirect /contacts/{id}?created=1
+```
+
+### Stage change (Kanban drag)
+```
+Card drop → useOptimistic: card तुरंत नए column में दिखता है
+  → moveStageAction({opportunityId, toStage, expectedFromStage, reason})
+  → changeStage() — TRANSACTION:
+       SELECT … FOR UPDATE           (row lock)
+       current stage ≠ expected?  → conflict ("किसी और ने पहले ही move कर दिया")
+       decideStageChange() rules   → lost बिना reason? reject
+       UPDATE opportunity (stage, status, won_at/lost_at, lost_reason)
+       INSERT stage_history
+       INSERT audit: stage.changed (+ opportunity.won/lost, + manual.override)
+  ← ok → page refresh होता है | error → optimistic move अपने आप वापस, error दिखता है
+```
+
+## 4. Important files (Phase 2)
+
+| File | काम |
+|---|---|
+| `src/lib/validation/contact.ts` | Input rules (Zod), tags/custom-fields parsing |
+| `src/lib/stage-rules.ts` | Stage change के नियम (pure function) |
+| `src/server/services/contacts.ts` | create, duplicate check, merge, update |
+| `src/server/services/opportunities.ts` | opportunity बनाना, `changeStage()` |
+| `src/server/services/audit.ts` | Audit entry लिखना (हमेशा उसी transaction में) |
+| `src/db/errors.ts` | Postgres unique-violation (23505) पहचानना |
+| `src/app/actions/*.ts` | Server actions — पतले wrappers |
+| `src/components/contacts/contact-form.tsx` | Create/edit form + duplicate panel |
+| `src/components/pipeline/kanban-board.tsx` | Drag-drop board, reason dialog |
+| `tests/services.integration.test.ts` | 13 real-DB tests (race conditions सहित) |
+
+## 5. पांच नए concepts
+
+**a) Race condition और उसका इलाज।** एक ही lead 5 बार एक साथ submit हुई। पांचों ने duplicate check किया और पांचों को "नहीं मिला" जवाब मिला। Unique index ने 4 inserts रोक दिए, और हमने उस DB error को "duplicate" जवाब में बदल दिया। Test में नतीजा: **ठीक 1 contact** बना।
+
+**b) Row lock (`FOR UPDATE`)।** दो लोग एक ही card एक साथ drag करें, तो database दूसरे को पहले के खत्म होने तक रोककर रखता है।
+
+**c) Optimistic concurrency (`expectedFromStage`)।** Browser बताता है "मैंने card को New lead में देखा था"। अगर तब तक card कहीं और जा चुका है, तो हम overwrite नहीं करते, conflict बताते हैं।
+
+**d) Merge rules।** Duplicate को update करते समय खाली value पुराना data **कभी नहीं मिटाती**। Tags जुड़ते हैं, notes append होते हैं, और owner सिर्फ तब भरा जाता है जब पहले खाली हो (routing के फैसले को override नहीं करते)।
+
+**e) Optimistic UI।** Card तुरंत move होता है ताकि UI तेज़ लगे। Server मना करे तो React खुद पुरानी state पर लौट जाता है।
+
+## 6. क्या fail हो सकता है
+
+| Failure | Detection | Recovery |
+|---|---|---|
+| Duplicate lead | `findDuplicates` या unique index (23505) | Warning + merge option; data corrupt नहीं होता |
+| Email एक person से, phone दूसरे से match | दोनों matches report होते हैं | Merge नहीं होता — इंसान तय करे |
+| दो लोग एक card move करें | Row lock + `expectedFromStage` | एक सफल, दूसरे को "refresh and try again" |
+| Lost बिना reason | `decideStageChange` | Reject; board पर reason dialog पहले ही पूछता है |
+| Transaction के बीच DB error | Transaction rollback | कुछ भी आधा save नहीं होता — audit भी नहीं |
+| Invalid input | Zod | सारे field errors एक बार में |
+
+## 7. Interview में क्या दिखाएं (Phase 2)
+
+1. Priya Sharma का email **बड़े अक्षरों** में डालकर नया contact बनाएं → duplicate warning।
+2. वही phone दूसरे format में डालें → phone पर match।
+3. नया lead बनाएं → lead page पर timeline में contact.created, opportunity.created।
+4. Pipeline पर card drag करें → activity log में entry।
+5. Card को Lost में drag करें → reason dialog।
+6. `npx vitest run tests/services.integration.test.ts` → "5 concurrent → exactly one contact"।
+
+Exact steps: `DEMO_COMMANDS.md` (Phase 2 section)।
+
+## 8. Interview questions — Phase 2
+
+**Q1. Walk me through what happens when a new lead is created.**
+> The input is validated and normalized first — lower-cased email, E.164 phone using the lead's country. Then I look for an existing contact by either key. If there's a match I return a duplicate result with who matched and on what, and the user can merge instead. If not, one transaction inserts the contact, a New-lead opportunity, the first stage-history row and the audit entries. Either all of it is saved or none of it is.
+
+**Q2. Your duplicate check and the insert are two steps. Isn't that a race?**
+> Yes, the check alone would race. That's why the normalized email and phone columns have unique indexes. If two requests pass the check at the same moment, Postgres rejects the second insert with a unique violation, and I translate that into the same duplicate result the user would normally see. I have a test that fires five identical submissions concurrently and asserts exactly one contact exists.
+
+**Q3. What if the email matches one contact and the phone matches another?**
+> I report both and don't merge anything automatically. Merging two different people is much worse than asking a human, so the system surfaces the conflict.
+
+**Q4. How do you stop two sales reps overwriting each other's pipeline changes?**
+> Two mechanisms. A row lock — SELECT FOR UPDATE — serializes concurrent changes to the same opportunity. And optimistic concurrency: the client sends the stage it saw, and if the deal has moved since, I return a conflict instead of silently overwriting. I tested two simultaneous moves of the same card: one succeeds, one gets a conflict.
+
+**Q5. Why is stage history a separate table instead of just the current stage?**
+> The current stage tells you where a deal is; history tells you how it got there — who moved it, when, and why. That's what you need for time-in-stage, conversion by stage, and for answering "who marked this lost?". It's append-only and written in the same transaction as the stage update, so they can't disagree.
+
+**Q6. Where do business rules live, and why?**
+> In a services layer, not in the UI or the route handlers. The Kanban board, the lead page, and later webhooks and automations all call the same changeStage function, so no entry point can skip validation, history or audit logging.
+
+**Q7. Why return result objects instead of throwing exceptions?**
+> A duplicate or a stale move is an expected business outcome, not a crash. Returning typed results like created, duplicate, invalid or conflict forces every caller to handle each case, and exceptions stay reserved for real failures like the database being down.
+
+**Common follow-ups**
+- *"Who is the actor in your audit log?"* → Honest answer: there's no login yet; actions are attributed to a configured demo admin. With real auth the actor comes from the session.
+- *"Does it sync to HighLevel?"* → Not yet. Right now it only writes to Postgres. The HighLevel sync is a later phase, done through jobs so an API outage doesn't block saving a lead.
+- *"Can the audit log be wrong?"* → It's written in the same transaction as the change, so if the change rolls back, the log entry does too.

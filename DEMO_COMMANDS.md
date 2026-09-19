@@ -118,7 +118,54 @@ Expected second output:
   - HIGHLEVEL_LOCATION_ID: HIGHLEVEL_LOCATION_ID is required when MOCK_MODE=false
 ```
 
-## 8. Reset before an interview
+## 8. Phase 2 — create, duplicates, edit, stage changes
+
+Run `npm run db:seed` first so the demo data is in its original state.
+
+### 8a. Create a new lead (happy path)
+1. `/contacts` → **Add contact**
+2. First name `Kiran`, Last name `Patil`, Email `kiran@patilstudio.example`,
+   Phone `98901 23456`, Country `IN`, Source *Website form*, Service *Web design*, Budget `4200`
+3. **Create contact** → you land on the lead page with a green "Contact created" message.
+4. Point at: phone shown as `+919890123456`, opportunity in **New lead** worth $4,200,
+   timeline entries *contact.created* and *opportunity.created*.
+
+### 8b. Duplicate by email (different case)
+1. **Add contact** → First name `Priya`, Email `PRIYA@SharmaDental.example`, Source any.
+2. Result: warning "A contact with this email or phone already exists" → *Priya Sharma, matched on email*.
+3. Click **Update this contact instead** → lands on Priya's page with "merged" message;
+   timeline shows *contact.merged*. Nothing was erased.
+
+### 8c. Duplicate by phone (different format)
+Phone `098220 11234`, Country `IN` → matched on **phone** (same number as `+91 98220 11234`).
+
+### 8d. Two different people match
+Email `priya@sharmadental.example` + Phone `+1 646 555 0142` → **both** Priya Sharma and
+Marcus Reid are listed, and no merge button appears.
+
+### 8e. Validation
+Leave First name empty and type Phone `123` → all errors appear at once.
+
+### 8f. Edit + manual owner override
+Lead page → **Edit contact** → change Owner → **Save changes**.
+Timeline: *contact.updated* (lists changed fields) and *owner.changed* ("manual override").
+
+### 8g. Pipeline stage changes
+1. `/pipeline` → drag a card from *New lead* to *Contacted* (or use the card's **Move to** menu).
+2. Open that lead → Stage history shows the new row with time and actor.
+3. Drag a card to **Lost** → the reason dialog appears; the Mark as lost button is disabled until
+   you type a reason. The lost reason then shows on the card.
+4. Drag a **Won** card back to *Negotiation* → reason required → timeline shows *manual.override*.
+5. `/activity` → the *stage.changed* entries are at the top.
+
+### 8h. Prove it with tests
+```bash
+npx vitest run tests/services.integration.test.ts
+```
+Point at: *creates exactly ONE contact when the same lead is submitted 5 times concurrently*
+and *serializes two simultaneous drags of the same card*.
+
+## 9. Reset before an interview
 
 ```bash
 npm run db:seed        # restores the exact demo dataset

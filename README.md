@@ -5,7 +5,9 @@ interview demonstration project. Stack: **Next.js 16 (App Router) + TypeScript,
 Tailwind CSS v4, PostgreSQL (Supabase-compatible) via Drizzle ORM, Vitest.**
 HighLevel and n8n integrations are added in later phases.
 
-> **Status: Phase 1 of 9 complete** — foundation, database, demo data, read-only UI.
+> **Status: Phase 2 of 9 complete** — database, demo data, contact create/edit with
+> duplicate detection, opportunities, Kanban stage changes, stage history and audit log.
+> Routing, scoring, automations, retries, webhooks and HighLevel are **not built yet**.
 > See `IMPLEMENTATION_LOG.md` for what is done and what remains.
 
 All people, companies, emails and phone numbers in the demo data are fictional.
@@ -77,6 +79,7 @@ message listing every invalid variable. Secrets are never shown in the UI.
 |---|---|---|
 | `DATABASE_URL` | yes | Postgres connection string |
 | `TEST_DATABASE_URL` | for DB tests | Separate DB — the test suite wipes it |
+| `DEMO_ACTOR_EMAIL` | no (`admin@leadflow.example`) | No login yet: UI actions are attributed to this user |
 | `APP_TIMEZONE` | no (`Asia/Kolkata`) | Timezone used to display times in the UI |
 | `DEFAULT_CURRENCY` | no (`USD`) | |
 | `MOCK_MODE` | no (`true`) | `true` = HighLevel calls go to the isolated mock provider |
@@ -96,13 +99,16 @@ before any real API call is written.
 ## Architecture (current)
 
 ```
-Browser ──► Next.js server components (pages)
-                 │
-                 ▼
-         src/server/queries   ← all read SQL lives here
-                 │
-                 ▼
-         src/db (Drizzle) ──► PostgreSQL
+Browser ──► pages (server components) ──► src/server/queries   (reads)
+   │
+   └──► forms / Kanban ──► src/app/actions (server actions, thin)
+                                  │
+                                  ▼
+                          src/server/services      (business rules, writes)
+                          contacts.ts  opportunities.ts  audit.ts
+                                  │  one transaction per change:
+                                  ▼  row + stage_history + audit_logs
+                          src/db (Drizzle) ──► PostgreSQL
 ```
 
 Planned (later phases): webhook routes → `webhook_events` (dedupe) → `jobs`

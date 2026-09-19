@@ -6,10 +6,7 @@
  * `npm test` still works on a machine without a database.
  * Proves the database itself (not just app code) enforces our guarantees.
  */
-import "../scripts/load-env";
-
-const testDbUrl = process.env.TEST_DATABASE_URL;
-if (testDbUrl) process.env.DATABASE_URL = testDbUrl; // must happen before getDb()
+import { hasTestDb } from "./helpers/test-db"; // must be first: points getDb() at TEST_DATABASE_URL
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { closeDb, getDb } from "@/db/client";
@@ -18,9 +15,8 @@ import { contacts, messages, stageHistory, webhookEvents, workflowRuns } from "@
 import { seedDatabase } from "@/db/seed";
 import { getContactDetail, getDashboardSummary, getPipelineBoard, listAppointments, listContacts } from "@/server/queries";
 
-const hasDb = Boolean(testDbUrl);
 
-describe.skipIf(!hasDb)("database (integration)", () => {
+describe.skipIf(!hasTestDb)("database (integration)", () => {
   beforeAll(async () => {
     await migrate(getDb(), { migrationsFolder: "./drizzle" });
     await seedDatabase(getDb());
