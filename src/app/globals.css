@@ -1,26 +1,70 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/*
+ * LeadFlow design tokens.
+ * Cool, low-chroma neutrals so status colour (hot / warm / cold, success /
+ * failure) carries meaning. One accent (cobalt) for interactive elements.
+ * Light theme only for now — an ops console used during working hours.
+ */
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --color-canvas: #f4f5f7;
+  --color-surface: #ffffff;
+  --color-ink: #172033;
+  --color-muted: #5a6475;
+  --color-faint: #8a93a3;
+  --color-line: #e1e4ea;
+  --color-line-strong: #c9ced8;
+  --color-nav: #1c2740;
+  --color-nav-text: #c3cbdb;
+
+  --color-accent: #2e5bdb;
+  --color-accent-soft: #e8eefc;
+
+  --color-hot: #c2410c;
+  --color-hot-soft: #fdeee6;
+  --color-warm: #9a6a12;
+  --color-warm-soft: #fbf3e2;
+  --color-cold: #3f6e8f;
+  --color-cold-soft: #e8f0f6;
+
+  --color-ok: #1f7a4d;
+  --color-ok-soft: #e5f4ec;
+  --color-bad: #b42318;
+  --color-bad-soft: #fdecea;
+  --color-pending: #5a6475;
+  --color-pending-soft: #eef0f3;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  color-scheme: light;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numbers line up in tables and KPIs */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }

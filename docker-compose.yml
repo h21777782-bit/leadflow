@@ -1,0 +1,26 @@
+# Option B for local development: plain PostgreSQL 16 in Docker.
+# (Option A is the Supabase CLI — see README.)
+#
+#   docker compose up -d
+#   DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/leadflow
+#   TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/leadflow_test
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres # local development only
+      POSTGRES_DB: leadflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - leadflow-pg:/var/lib/postgresql/data
+      - ./scripts/docker-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  leadflow-pg:
