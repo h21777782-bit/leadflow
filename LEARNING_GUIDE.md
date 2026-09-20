@@ -262,3 +262,124 @@ Exact steps: `DEMO_COMMANDS.md` (Phase 2 section)।
 - *"Who is the actor in your audit log?"* → Honest answer: there's no login yet; actions are attributed to a configured demo admin. With real auth the actor comes from the session.
 - *"Does it sync to HighLevel?"* → Not yet. Right now it only writes to Postgres. The HighLevel sync is a later phase, done through jobs so an API outage doesn't block saving a lead.
 - *"Can the audit log be wrong?"* → It's written in the same transaction as the change, so if the change rolls back, the log entry does too.
+
+---
+
+# Phase 3 — Lead Scoring & Smart Routing (Hinglish)
+
+## 1. Humne kya banaya — ek line mein
+
+Har lead ko **0–100 ka score** milta hai (Hot / Warm / Cold) *aur har point ka reason* likha hota hai. Phir ek **routing engine** decide karta hai ki kaunsa sales rep us lead ko handle karega — rules, expertise, availability aur workload dekh kar. Sab kuch database mein save hota hai, audit log ke saath.
+
+## 2. Scoring kaise kaam karta hai
+
+File: `src/lib/scoring.ts` (pure function — database ka koi kaam nahi, isliye easily test hota hai).
+
+| Factor | Max | Kaise milta hai |
+|---|---|---|
+| Budget fit | 30 | $10k+ = 30, $5k+ = 24, $2.5k+ = 16, $1k+ = 8, us se kam = 2. **Budget nahi bataya = 12** |
+| Service fit | 20 | CRM automation 20 … social media 10. **Service nahi bataya = 8** |
+| Engagement | 20 | Profile complete (company, email+phone, location, notes) max 8 + replies (1 = 6, 2 = 9, 3+ = 12) |
+| Response | 15 | Reply kiya = 15. **Abhi contact hi nahi kiya = 7**. 2+ baar contact kiya, reply nahi = 3 |
+| Appointment | 15 | Call ho gayi = 15, booked = 13, **abhi booked nahi = 5**, cancelled = 3, no-show = 2 |
+
+**Sabse important rule:** jo info *pata nahi hai*, uske liye zero nahi — **neutral points** milte hain. Naye lead ne abhi reply nahi kiya kyunki humne contact hi nahi kiya — ye uski galti nahi hai. Score sirf *saboot* (evidence) pe girta hai: bahut chhota budget, 2+ follow-up ka jawab nahi, no-show.
+
+Ghalat input (negative budget, NaN) ko bhi "unknown" maana jaata hai, zero nahi.
+
+## 3. Routing kaise kaam karta hai
+
+File: `src/lib/routing.ts` (ye bhi pure).
+
+```
+Lead aaya
+  → rules ko priority order mein check karo (10, 20, 30 … 100)
+  → rule match hua? (service, country, source, min budget)
+      → rule ke reps mein se ELIGIBLE kaun hai?
+          ✗ inactive   ✗ unavailable (leave pe)   ✗ capacity full
+          ✗ (agar rule bole) ye service nahi bechta
+      → koi eligible nahi? → agla rule try karo
+      → eligible mein se jo ye service bechta hai, use prefer karo
+      → strategy se ek chuno:
+          assign_user  = list mein pehla available
+          round_robin  = jise sabse pehle last lead mila tha
+          least_loaded = jiska workload % sabse kam
+  → koi bhi rule kaam nahi aaya → UNASSIGNED + reason (kabhi galat rep ko silently nahi dete)
+```
+
+## 4. Reassignment ke rules (kab owner badalta hai)
+
+File: `decideRoutingNeed()` in `src/lib/routing.ts`
+
+1. Lead ka koi open deal nahi → routing nahi.
+2. Owner kisi insaan ne manually chuna → automatic routing **kabhi** override nahi karegi (sirf "Route now" button).
+3. Owner nahi hai → route karo.
+4. Owner leave pe/inactive **aur** lead se abhi baat shuru nahi hui (New lead / Attempting contact) → naya owner.
+5. Owner leave pe, lekin baat chal rahi hai (Contacted ya aage) → **mat badlo**, insaan decide kare.
+6. Baaki sab → owner same rahega ("sticky ownership"), chahe lead ki details badal jaayein.
+
+Kyun? Jis lead se kisi ki baat chal rahi hai, use beech mein kisi aur ko dena customer ke liye bura experience hai.
+
+## 5. Database kaise update hota hai (step by step)
+
+File: `src/server/services/lead-intelligence.ts` → `processLeadChange()`
+
+**Step A — Score (ek transaction):**
+1. `contacts` row ko lock karo (`FOR UPDATE`)
+2. DB se facts padho: budget, service, messages (inbound/outbound), appointments, stages
+3. `scoreLead()` chalao
+4. `contacts.lead_score / lead_band / scored_at` update
+5. Score badla? → `lead_scores` mein history row + `audit_logs` mein `lead.scored`
+   (score same hai to nayi row nahi — **idempotent**)
+
+**Step B — Routing (alag transaction):**
+1. Contact row lock
+2. **Saare reps ki rows lock** (id order mein — isse deadlock nahi hota)
+3. Policy check (`decideRoutingNeed`) — route karna hai ya nahi?
+4. Lock ke andar workload count karo (active leads = owned + open deal)
+5. `decideAssignment()` chalao
+6. Save: `contacts.owner_id`, open `opportunities.owner_id`, rep ka `last_assigned_at`,
+   `routing_decisions` row (reason + rule-by-rule trace), audit (`owner.assigned` / `owner.reassigned` / `lead.unassigned`)
+
+**Kab chalta hai?** Contact create/update/merge, opportunity create, stage change, reply log, rep availability/capacity change, routing rule save, "Route now" button.
+
+**Important:** ye original change (jaise contact create) ke **commit hone ke baad** chalta hai. Agar scoring/routing fail ho jaaye, contact phir bhi save rehta hai aur failure audit log mein `lead_intelligence.failed` ke roop mein dikhta hai.
+
+## 6. Concurrency — do requests ek saath aayein to?
+
+**Same lead, 4 routing requests ek saath:** pehli request contact lock leti hai aur assign karti hai. Baaki teen wait karti hain; lock milne par dekhti hain "owner already hai" → skip. Test: exactly 1 assignment.
+
+**5 alag leads, rep ke paas sirf 1 slot:** reps ki rows lock hain, isliye sab ek-ek karke chalte hain. Har ek lock ke andar fresh workload count karta hai → sirf pehle ko slot milta hai, baaki 4 "at capacity" reason ke saath Unassigned. Test: capacity kabhi exceed nahi hui.
+
+## 7. Important files (Phase 3)
+
+| File | Kaam |
+|---|---|
+| `src/lib/scoring.ts` | Scoring engine + config |
+| `src/lib/routing.ts` | Routing engine + reassignment policy |
+| `src/server/services/lead-intelligence.ts` | DB se jodna: locks, save, audit, triggers |
+| `src/server/services/routing-rules.ts` | Rules save karna (Zod validation) |
+| `src/app/actions/lead-intelligence.ts` | Reply log, Route now, rep update, rule save |
+| `src/components/lead/score-panel.tsx` | Score breakdown UI |
+| `src/components/settings/*` | Rep aur rule editors |
+| `drizzle/0001_scoring_routing.sql` | Naye columns + `routing_decisions` table |
+| `scripts/demo-routing.ts` | Demo scenario |
+| `tests/scoring.test.ts`, `tests/routing.test.ts`, `tests/lead-intelligence.integration.test.ts` | 56 naye tests |
+
+## 8. Is phase mein jo bugs pakde (development ke dauraan, production mein nahi)
+
+- **jsonb key order:** Postgres `jsonb` keys ka order badal deta hai, isliye `JSON.stringify` compare hamesha "badla hai" bolta tha → har baar duplicate history. Fix: sorted-key comparison.
+- **ownerId missing = unassign:** Partial update mein ownerId na bhejne pe lead ka owner hat jaata tha. Fix: na bhejo = same rakho.
+- **Capacity 0 ho jaana:** Field missing hone pe `Number(null)` = 0. Fix: validation.
+
+Interview mein ye bata sakte hain: *"Tests ne ye bugs pakde, isliye main integration tests real database pe chalata hoon."*
+
+## 9. Kya fail ho sakta hai
+
+| Failure | Kaise pata chalta hai | Recovery |
+|---|---|---|
+| Koi eligible rep nahi | Lead page / dashboard pe Unassigned + reason | Rep available karo ya rule badlo → waiting leads apne aap retry |
+| Rep leave pe gaya | Settings save | Uske not-contacted leads automatically move; baaki same |
+| Scoring/routing crash | `lead_intelligence.failed` audit | Contact safe; "Route now" se dobara |
+| Do routers ek saath | Row locks | Ek jeetta hai, doosra skip / next rep |
+| Galat rule | Zod validation | Save hi nahi hota, saare errors ek saath |

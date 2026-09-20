@@ -15,25 +15,26 @@ export type SeedUser = {
   timezone: string;
   services: Service[];
   regions: string[];
+  isActive: boolean;
   isAvailable: boolean;
   maxOpenLeads: number;
 };
 
 export const SEED_USERS: SeedUser[] = [
-  { key: "admin", name: "Ops Admin", email: "admin@leadflow.example", role: "admin", timezone: "Asia/Kolkata", services: [], regions: [], isAvailable: false, maxOpenLeads: 0 },
-  { key: "aarav", name: "Aarav Mehta", email: "aarav@leadflow.example", role: "sales_rep", timezone: "Asia/Kolkata", services: ["web_design", "branding"], regions: ["IN", "AE"], isAvailable: true, maxOpenLeads: 25 },
-  { key: "neha", name: "Neha Kulkarni", email: "neha@leadflow.example", role: "sales_rep", timezone: "Asia/Kolkata", services: ["crm_automation", "social_media"], regions: ["IN", "SG"], isAvailable: true, maxOpenLeads: 25 },
-  { key: "sophie", name: "Sophie Turner", email: "sophie@leadflow.example", role: "sales_rep", timezone: "Europe/London", services: ["seo", "paid_ads"], regions: ["GB", "DE", "NL", "IE"], isAvailable: true, maxOpenLeads: 20 },
-  { key: "daniel", name: "Daniel Brooks", email: "daniel@leadflow.example", role: "sales_rep", timezone: "America/New_York", services: ["crm_automation", "paid_ads"], regions: ["US", "CA"], isAvailable: true, maxOpenLeads: 20 },
+  { key: "admin", name: "Ops Admin", email: "admin@leadflow.example", role: "admin", timezone: "Asia/Kolkata", services: [], regions: [], isActive: true, isAvailable: false, maxOpenLeads: 0 },
+  { key: "aarav", name: "Aarav Mehta", email: "aarav@leadflow.example", role: "sales_rep", timezone: "Asia/Kolkata", services: ["web_design", "branding"], regions: ["IN", "AE"], isActive: true, isAvailable: true, maxOpenLeads: 25 },
+  { key: "neha", name: "Neha Kulkarni", email: "neha@leadflow.example", role: "sales_rep", timezone: "Asia/Kolkata", services: ["crm_automation", "social_media"], regions: ["IN", "SG"], isActive: true, isAvailable: true, maxOpenLeads: 25 },
+  { key: "sophie", name: "Sophie Turner", email: "sophie@leadflow.example", role: "sales_rep", timezone: "Europe/London", services: ["seo", "paid_ads"], regions: ["GB", "DE", "NL", "IE"], isActive: true, isAvailable: true, maxOpenLeads: 20 },
+  { key: "daniel", name: "Daniel Brooks", email: "daniel@leadflow.example", role: "sales_rep", timezone: "America/New_York", services: ["crm_automation", "paid_ads"], regions: ["US", "CA"], isActive: true, isAvailable: true, maxOpenLeads: 20 },
   // Unavailable on purpose: lets the routing demo show "skip unavailable rep".
-  { key: "liam", name: "Liam Carter", email: "liam@leadflow.example", role: "sales_rep", timezone: "Australia/Sydney", services: ["web_design", "seo"], regions: ["AU", "NZ"], isAvailable: false, maxOpenLeads: 20 },
+  { key: "liam", name: "Liam Carter", email: "liam@leadflow.example", role: "sales_rep", timezone: "Australia/Sydney", services: ["web_design", "seo"], regions: ["AU", "NZ"], isActive: true, isAvailable: false, maxOpenLeads: 20 },
 ];
 
 export type SeedRoutingRule = {
   name: string;
   priority: number;
-  conditions: { services?: Service[]; countries?: string[]; sources?: LeadSource[]; minBudget?: number };
-  strategy: "assign_user" | "round_robin";
+  conditions: { services?: Service[]; countries?: string[]; sources?: LeadSource[]; minBudget?: number; requireServiceExpertise?: boolean };
+  strategy: "assign_user" | "round_robin" | "least_loaded";
   targets: string[]; // SeedUser keys
 };
 
@@ -42,7 +43,8 @@ export const SEED_ROUTING_RULES: SeedRoutingRule[] = [
   { name: "India, Gulf & Singapore", priority: 20, conditions: { countries: ["IN", "AE", "SG"] }, strategy: "round_robin", targets: ["aarav", "neha"] },
   { name: "UK & Europe", priority: 30, conditions: { countries: ["GB", "DE", "NL", "IE"] }, strategy: "assign_user", targets: ["sophie"] },
   { name: "Australia & New Zealand", priority: 40, conditions: { countries: ["AU", "NZ"] }, strategy: "round_robin", targets: ["liam", "aarav"] },
-  { name: "Fallback — all available reps", priority: 100, conditions: {}, strategy: "round_robin", targets: ["aarav", "neha", "sophie", "daniel", "liam"] },
+  // Fallback only hands a lead to someone who actually sells that service.
+  { name: "Fallback — any rep who handles the service", priority: 100, conditions: { requireServiceExpertise: true }, strategy: "least_loaded", targets: ["aarav", "neha", "sophie", "daniel", "liam"] },
 ];
 
 export type SeedLead = {
@@ -60,7 +62,8 @@ export type SeedLead = {
   lostAfter?: PipelineStage; // for lost deals: the last open stage reached
   lostReason?: string;
   value: number;
-  owner: string; // SeedUser key
+  /** SeedUser key. Omitted for brand-new leads: the real routing engine assigns them during seeding. */
+  owner?: string;
   createdDaysAgo: number;
   tags: string[];
   notes?: string;
@@ -69,10 +72,10 @@ export type SeedLead = {
 
 export const SEED_LEADS: SeedLead[] = [
   // ── New lead (4)
-  { firstName: "Priya", lastName: "Sharma", company: "Sharma Dental Care", email: "priya@sharmadental.example", phone: "+91 98220 11234", country: "IN", timezone: "Asia/Kolkata", source: "website_form", service: "web_design", budget: 4000, stage: "new_lead", value: 4000, owner: "aarav", createdDaysAgo: 0, tags: ["healthcare"], customFields: { clinics: 2 } },
-  { firstName: "Ethan", lastName: "Walker", company: "Walker HVAC", email: "ethan@walkerhvac.example", phone: "(415) 555-2671", country: "US", timezone: "America/Los_Angeles", source: "google_ads", service: "crm_automation", budget: 9000, stage: "new_lead", value: 9000, owner: "daniel", createdDaysAgo: 0, tags: ["home-services"], customFields: { crm: "none" } },
-  { firstName: "Omar", lastName: "Haddad", company: "Haddad Realty", email: "omar@haddadrealty.example", phone: "+971 50 123 4567", country: "AE", timezone: "Asia/Dubai", source: "meta_ads", service: "paid_ads", budget: 2500, stage: "new_lead", value: 2500, owner: "neha", createdDaysAgo: 1, tags: ["real-estate"] },
-  { firstName: "Grace", lastName: "Lee", company: "Brightside Tutoring", email: "grace@brightside.example", phone: "0412 345 678", country: "AU", timezone: "Australia/Sydney", source: "website_form", service: "seo", budget: 800, stage: "new_lead", value: 800, owner: "aarav", createdDaysAgo: 1, tags: ["education"] },
+  { firstName: "Priya", lastName: "Sharma", company: "Sharma Dental Care", email: "priya@sharmadental.example", phone: "+91 98220 11234", country: "IN", timezone: "Asia/Kolkata", source: "website_form", service: "web_design", budget: 4000, stage: "new_lead", value: 4000, createdDaysAgo: 0, tags: ["healthcare"], customFields: { clinics: 2 } },
+  { firstName: "Ethan", lastName: "Walker", company: "Walker HVAC", email: "ethan@walkerhvac.example", phone: "(415) 555-2671", country: "US", timezone: "America/Los_Angeles", source: "google_ads", service: "crm_automation", budget: 9000, stage: "new_lead", value: 9000, createdDaysAgo: 0, tags: ["home-services"], customFields: { crm: "none" } },
+  { firstName: "Omar", lastName: "Haddad", company: "Haddad Realty", email: "omar@haddadrealty.example", phone: "+971 50 123 4567", country: "AE", timezone: "Asia/Dubai", source: "meta_ads", service: "paid_ads", budget: 2500, stage: "new_lead", value: 2500, createdDaysAgo: 1, tags: ["real-estate"] },
+  { firstName: "Grace", lastName: "Lee", company: "Brightside Tutoring", email: "grace@brightside.example", phone: "0412 345 678", country: "AU", timezone: "Australia/Sydney", source: "website_form", service: "seo", budget: 800, stage: "new_lead", value: 800, createdDaysAgo: 1, tags: ["education"] },
 
   // ── Attempting contact (3)
   { firstName: "Rohan", lastName: "Deshpande", company: "Deshpande Logistics", email: "rohan@deshpandelogistics.example", phone: "+91 90110 22345", country: "IN", timezone: "Asia/Kolkata", source: "linkedin", service: "crm_automation", budget: 6000, stage: "attempting_contact", value: 6000, owner: "neha", createdDaysAgo: 3, tags: ["logistics"] },

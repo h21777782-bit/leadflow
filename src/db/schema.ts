@@ -34,7 +34,9 @@ export const opportunityStatusEnum = pgEnum("opportunity_status", ["open", "won"
 export const userRoleEnum = pgEnum("user_role", ["admin", "sales_rep"]);
 export const actorTypeEnum = pgEnum("actor_type", ["system", "user", "webhook", "integration", "worker"]);
 export const leadBandEnum = pgEnum("lead_band", ["hot", "warm", "cold"]);
-export const routingStrategyEnum = pgEnum("routing_strategy", ["assign_user", "round_robin"]);
+export const routingStrategyEnum = pgEnum("routing_strategy", ["assign_user", "round_robin", "least_loaded"]);
+export const messageDirectionEnum = pgEnum("message_direction", ["outbound", "inbound"]);
+export const routingOutcomeEnum = pgEnum("routing_outcome", ["assigned", "reassigned", "unassigned"]);
 export const workflowRunStatusEnum = pgEnum("workflow_run_status", ["running", "completed", "stopped", "failed"]);
 export const jobStatusEnum = pgEnum("job_status", ["pending", "running", "succeeded", "retrying", "dead", "cancelled"]);
 export const messageChannelEnum = pgEnum("message_channel", ["email", "sms"]);
@@ -55,7 +57,8 @@ export const users = pgTable("users", {
   timezone: text("timezone").notNull(),
   services: text("services").array().notNull().default(sql`'{}'::text[]`),
   regions: text("regions").array().notNull().default(sql`'{}'::text[]`),
-  isAvailable: boolean("is_available").notNull().default(true),
+  isActive: boolean("is_active").notNull().default(true), // employment status
+  isAvailable: boolean("is_available").notNull().default(true), // e.g. on leave
   maxOpenLeads: integer("max_open_leads").notNull().default(25),
   lastAssignedAt: timestamp("last_assigned_at", { withTimezone: true }),
   createdAt: createdAt(),
@@ -96,10 +99,19 @@ export const contacts = pgTable(
     lastContactedAt: timestamp("last_contacted_at", { withTimezone: true }),
     nextFollowUpAt: timestamp("next_follow_up_at", { withTimezone: true }),
     ghlContactId: text("ghl_contact_id"),
+    // Current score (denormalized for fast lists/dashboards; history in lead_scores)
+    leadScore: integer("lead_score"),
+    leadBand: leadBandEnum("lead_band"),
+    scoredAt: timestamp("scored_at", { withTimezone: true }),
+    // Ownership provenance: routing | manual | seed (null = never assigned)
+    assignmentSource: text("assignment_source"),
+    assignedAt: timestamp("assigned_at", { withTimezone: true }),
+    unassignedReason: text("unassigned_reason"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
+    index("contacts_band_idx").on(t.leadBand),
     uniqueIndex("contacts_email_normalized_uq").on(t.emailNormalized),
     uniqueIndex("contacts_phone_e164_uq").on(t.phoneE164),
     uniqueIndex("contacts_ghl_contact_id_uq").on(t.ghlContactId),
@@ -156,12 +168,7 @@ export const stageHistory = pgTable(
 );
 
 // ── Lead routing & scoring ────────────────────────────────────────────────────
-export type RoutingConditions = {
-  services?: string[];
-  countries?: string[];
-  sources?: string[];
-  minBudget?: number;
-};
+export type RoutingConditions = import("@/lib/routing").RuleConditions;
 
 export const routingRules = pgTable("routing_rules", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -184,9 +191,33 @@ export const leadScores = pgTable(
     score: integer("score").notNull(),
     band: leadBandEnum("band").notNull(),
     breakdown: jsonb("breakdown").$type<ScoreFactor[]>().notNull(),
+    trigger: text("trigger"),
+    configVersion: text("config_version"),
     computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("lead_scores_contact_idx").on(t.contactId, t.computedAt)],
+);
+
+// Every routing attempt that produced an outcome (assign / reassign / leave unassigned).
+export const routingDecisions = pgTable(
+  "routing_decisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    contactId: uuid("contact_id").notNull().references(() => contacts.id, { onDelete: "cascade" }),
+    outcome: routingOutcomeEnum("outcome").notNull(),
+    assignedUserId: uuid("assigned_user_id").references(() => users.id, { onDelete: "set null" }),
+    previousUserId: uuid("previous_user_id").references(() => users.id, { onDelete: "set null" }),
+    ruleId: uuid("rule_id").references(() => routingRules.id, { onDelete: "set null" }),
+    ruleName: text("rule_name"),
+    trigger: text("trigger").notNull(),
+    reason: text("reason").notNull(),
+    trace: jsonb("trace").$type<unknown[]>().notNull().default([]),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("routing_decisions_contact_idx").on(t.contactId, t.createdAt),
+    index("routing_decisions_created_idx").on(t.createdAt),
+  ],
 );
 
 // ── Workflows, jobs, messages ────────────────────────────────────────────────
@@ -245,6 +276,7 @@ export const messages = pgTable(
     contactId: uuid("contact_id").notNull().references(() => contacts.id, { onDelete: "cascade" }),
     workflowRunId: uuid("workflow_run_id").references(() => workflowRuns.id, { onDelete: "set null" }),
     channel: messageChannelEnum("channel").notNull(),
+    direction: messageDirectionEnum("direction").notNull().default("outbound"),
     templateKey: text("template_key").notNull(),
     toAddress: text("to_address").notNull(),
     body: text("body").notNull(),

@@ -25,6 +25,8 @@ export default async function PipelinePage() {
       nextAction: o.nextAction,
       lostReason: o.lostReason,
       activityLabel: formatRelative(o.lastActivityAt, now),
+      leadScore: o.leadScore,
+      leadBand: o.leadBand,
     })),
   );
 

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { connection } from "next/server";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState, Panel } from "@/components/ui/panel";
+import { BandBadge } from "@/components/ui/badges";
 import { Table, Td, Th } from "@/components/ui/table";
 import { getEnv } from "@/lib/env";
 import { formatDateTime, formatMoney } from "@/lib/format";
@@ -73,6 +74,86 @@ export default async function DashboardPage() {
             </div>
           )}
         </Panel>
+
+        <div className="grid gap-6 xl:grid-cols-5">
+          <Panel title="Lead temperature" description="Open leads only, from the scoring engine." className="xl:col-span-2">
+            <dl className="grid grid-cols-3 gap-3">
+              {([
+                ["hot", "Hot", "70–100", "bg-hot-soft text-hot"],
+                ["warm", "Warm", "40–69", "bg-warm-soft text-warm"],
+                ["cold", "Cold", "0–39", "bg-cold-soft text-cold"],
+              ] as const).map(([k, label, range, tone]) => (
+                <div key={k} className={`rounded-md px-3 py-2 ${tone}`}>
+                  <dt className="text-[13px] font-medium">{label}</dt>
+                  <dd className="tabular text-2xl font-semibold">{d.bands[k]}</dd>
+                  <dd className="text-xs opacity-80">score {range}</dd>
+                </div>
+              ))}
+            </dl>
+            {d.bands.unscored > 0 && <p className="mt-2 text-xs text-muted">{d.bands.unscored} open lead(s) not scored yet.</p>}
+          </Panel>
+
+          <Panel title={`Unassigned leads (${d.unassigned.length})`} className="xl:col-span-3" flush>
+            {d.unassigned.length === 0 ? (
+              <p className="px-5 py-4 text-muted">Every open lead has an owner.</p>
+            ) : (
+              <ul className="divide-y divide-line">
+                {d.unassigned.map((u) => (
+                  <li key={u.id} className="px-5 py-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <Link href={`/contacts/${u.id}`} className="font-medium text-accent hover:underline">{u.name}</Link>
+                      <BandBadge band={u.leadBand} score={u.leadScore} />
+                    </div>
+                    <p className="text-[13px] text-muted">{u.reason ?? "Not routed yet"}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Panel>
+        </div>
+
+        <div className="grid gap-6 xl:grid-cols-5">
+          <Panel title="Sales rep workload" description="Active leads = owned leads with an open deal." className="xl:col-span-2">
+            <ul className="space-y-3">
+              {d.workload.map((r) => {
+                const pct = r.maxOpenLeads ? Math.min(100, (r.activeLeads / r.maxOpenLeads) * 100) : 100;
+                const status = !r.isActive ? "Inactive" : !r.isAvailable ? "Unavailable" : r.activeLeads >= r.maxOpenLeads ? "At capacity" : null;
+                return (
+                  <li key={r.id}>
+                    <div className="flex justify-between text-[13px]">
+                      <span className="font-medium">{r.name}{status && <span className="ml-2 font-normal text-warm">{status}</span>}</span>
+                      <span className="tabular">{r.activeLeads} / {r.maxOpenLeads}</span>
+                    </div>
+                    <div className="mt-1 h-1.5 rounded-full bg-pending-soft">
+                      <div className={`h-1.5 rounded-full ${status ? "bg-warm" : "bg-accent"}`} style={{ width: `${pct}%` }} />
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+            <Link href="/settings" className="mt-4 inline-block text-[13px] font-medium text-accent hover:underline">Change availability or capacity</Link>
+          </Panel>
+
+          <Panel title="Routing decisions" description="Latest assignments made by the routing engine." className="xl:col-span-3" flush>
+            {d.decisions.length === 0 ? (
+              <p className="px-5 py-4 text-muted">No routing decisions yet.</p>
+            ) : (
+              <ul className="divide-y divide-line">
+                {d.decisions.map((r) => (
+                  <li key={r.id} className="px-5 py-2.5 text-[13px]">
+                    <p>
+                      <Link href={`/contacts/${r.contactId}`} className="font-medium text-accent hover:underline">{r.contactName}</Link>{" "}
+                      {r.outcome === "unassigned" ? <span className="text-warm">left unassigned</span> : <>→ <span className="font-medium">{r.assignedName}</span></>}
+                      {r.outcome === "reassigned" && r.previousName && <span className="text-muted"> (from {r.previousName})</span>}
+                      <span className="text-faint"> — {formatDateTime(r.createdAt, tz)}, {r.trigger}</span>
+                    </p>
+                    <p className="text-muted">{r.ruleName ?? r.reason}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Panel>
+        </div>
 
         <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-line bg-line md:grid-cols-4 xl:grid-cols-7">
           {kpis.map((k) => (

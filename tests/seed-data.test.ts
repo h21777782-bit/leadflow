@@ -31,7 +31,8 @@ describe("demo seed data", () => {
   it("uses valid timezones and known owners", () => {
     for (const l of SEED_LEADS) {
       expect(isValidTimeZone(l.timezone)).toBe(true);
-      expect(userKeys.has(l.owner)).toBe(true);
+      if (l.owner) expect(userKeys.has(l.owner)).toBe(true);
+      else expect(l.stage, "only brand-new leads are left for the routing engine").toBe("new_lead");
     }
   });
 

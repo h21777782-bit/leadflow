@@ -5,9 +5,9 @@ interview demonstration project. Stack: **Next.js 16 (App Router) + TypeScript,
 Tailwind CSS v4, PostgreSQL (Supabase-compatible) via Drizzle ORM, Vitest.**
 HighLevel and n8n integrations are added in later phases.
 
-> **Status: Phase 2 of 9 complete** — database, demo data, contact create/edit with
-> duplicate detection, opportunities, Kanban stage changes, stage history and audit log.
-> Routing, scoring, automations, retries, webhooks and HighLevel are **not built yet**.
+> **Status: Phase 3 of 9 complete** — contacts with duplicate detection, opportunities, Kanban,
+> audit log, **lead scoring (Hot/Warm/Cold with explanations) and rule-based lead routing**.
+> Automations/worker, retries, webhooks and HighLevel are **not built yet**.
 > See `IMPLEMENTATION_LOG.md` for what is done and what remains.
 
 All people, companies, emails and phone numbers in the demo data are fictional.
@@ -66,6 +66,7 @@ docker compose up -d
 | `npm run db:seed` | **Wipe** app tables and load demo data (refuses in production unless `ALLOW_DEMO_SEED=true`) |
 | `npm run db:reset` | migrate + seed |
 | `npm run db:studio` | Drizzle Studio (browse tables) |
+| `npm run demo:routing` | DEMO SCENARIO: runs scoring + routing through the real services with fictional leads |
 
 ---
 
@@ -147,6 +148,7 @@ tests/                   Vitest unit + DB integration tests
 | `opportunities` | Deal: stage, status, value, owner, next action, lost reason | |
 | `stage_history` | Append-only log of every stage change | |
 | `routing_rules` | Configurable rules: conditions (jsonb), strategy, target reps | |
+| `routing_decisions` | Every assignment / reassignment / unassigned outcome with reason + rule trace | |
 | `lead_scores` | Score, band (hot/warm/cold), per-factor breakdown | |
 | `workflow_runs` | One run of an automation for a contact | **only one running run per (workflow, contact)** |
 | `jobs` | Postgres job queue: status, run_at, attempts, last_error | **unique idempotency key** |

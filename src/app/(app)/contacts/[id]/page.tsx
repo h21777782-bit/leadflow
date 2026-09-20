@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
-import { Badge, StageBadge, StatusBadge } from "@/components/ui/badges";
+import { Badge, BandBadge, StageBadge, StatusBadge } from "@/components/ui/badges";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { getEnv } from "@/lib/env";
@@ -13,6 +13,8 @@ import { SERVICE_LABEL, SOURCE_LABEL, STAGE_META, type LeadSource, type Service 
 import { getContactDetail } from "@/server/queries";
 import { NewOpportunityForm } from "@/components/pipeline/new-opportunity-form";
 import { StageControl } from "@/components/pipeline/stage-control";
+import { ScorePanel } from "@/components/lead/score-panel";
+import { LogReplyForm, RouteNowButton } from "@/components/lead/lead-intel-actions";
 import { isUuid } from "@/lib/ids";
 
 export const metadata: Metadata = { title: "Lead details" };
@@ -57,6 +59,7 @@ export default async function LeadDetailsPage({ params, searchParams }: PageProp
           <span className="flex flex-wrap items-center gap-2">
             {c.company}
             {opp && <StageBadge stage={opp.stage} />}
+            <BandBadge band={c.leadBand} score={c.leadScore} />
             {c.tags.map((t) => <Badge key={t}>{t}</Badge>)}
           </span>
         }
@@ -74,6 +77,69 @@ export default async function LeadDetailsPage({ params, searchParams }: PageProp
       )}
       <div className="grid gap-6 px-8 py-6 xl:grid-cols-3">
         <div className="space-y-6">
+          <Panel title="Lead score" description="Recalculated automatically when the lead, its deals, messages or appointments change.">
+            <ScorePanel
+              score={c.leadScore}
+              band={c.leadBand}
+              scoredAt={c.scoredAt}
+              factors={data.scoreHistory[0]?.breakdown ?? null}
+              history={data.scoreHistory}
+              tz={tz}
+            />
+            <div className="mt-5 border-t border-line pt-4">
+              <LogReplyForm contactId={c.id} />
+            </div>
+          </Panel>
+
+          <Panel title="Ownership & routing">
+            {c.ownerId ? (
+              <p>
+                <span className="font-medium">{data.ownerName}</span>
+                <span className="text-muted">
+                  {" "}— {c.assignmentSource === "manual" ? "chosen manually (automatic routing is off for this lead)" : c.assignmentSource === "seed" ? "pre-assigned in demo data" : "assigned by routing"}
+                  {c.assignedAt ? `, ${formatDateTime(c.assignedAt, tz)}` : ""}
+                </span>
+              </p>
+            ) : (
+              <div className="rounded-md border border-warm/40 bg-warm-soft p-3">
+                <p className="font-medium">Unassigned</p>
+                <p className="mt-0.5 text-[13px]">{c.unassignedReason ?? "No routing attempt yet."}</p>
+                <div className="mt-3">
+                  <RouteNowButton contactId={c.id} />
+                </div>
+              </div>
+            )}
+            <h3 className="mt-5 text-[13px] font-medium text-muted">Routing decisions</h3>
+            {data.routing.length === 0 ? (
+              <p className="mt-1 text-[13px] text-faint">None recorded{c.assignmentSource === "seed" ? " — owner came from demo seed data" : ""}.</p>
+            ) : (
+              <ol className="mt-2 space-y-3 border-l border-line pl-4">
+                {data.routing.map((d) => (
+                  <li key={d.id} className="text-[13px]">
+                    <p>
+                      <span className="font-medium">
+                        {d.outcome === "unassigned" ? "Left unassigned" : d.outcome === "reassigned" ? `Reassigned to ${d.assignedName}` : `Assigned to ${d.assignedName}`}
+                      </span>
+                      <span className="text-muted"> — {formatDateTime(d.createdAt, tz)}, trigger: {d.trigger}</span>
+                    </p>
+                    <p className="text-muted">{d.reason}</p>
+                    <details className="mt-1">
+                      <summary className="cursor-pointer text-xs text-accent">Show rule-by-rule trace</summary>
+                      <ul className="mt-1 space-y-1 text-xs text-muted">
+                        {(d.trace as { ruleName: string; matched: boolean; why: string; candidates?: { name: string; note: string }[] }[]).map((t, i) => (
+                          <li key={i}>
+                            <span className={t.matched ? "text-ink" : ""}>{t.ruleName}</span>: {t.why}
+                            {t.candidates && <span> [{t.candidates.map((c2) => `${c2.name}: ${c2.note}`).join("; ")}]</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </Panel>
+
           <Panel title="Contact">
             <dl className="space-y-2.5">
               {fields.map(([k, v]) => (

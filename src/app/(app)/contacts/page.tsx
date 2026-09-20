@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { connection } from "next/server";
-import { Badge, StageBadge } from "@/components/ui/badges";
+import { Badge, BandBadge, StageBadge } from "@/components/ui/badges";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState, Panel } from "@/components/ui/panel";
 import { Table, Td, Th } from "@/components/ui/table";
@@ -42,6 +42,7 @@ export default async function ContactsPage() {
                   <Th>Source</Th>
                   <Th>Service</Th>
                   <Th className="text-right">Budget</Th>
+                  <Th>Score</Th>
                   <Th>Owner</Th>
                   <Th>Stage</Th>
                   <Th>Next follow-up</Th>
@@ -63,7 +64,11 @@ export default async function ContactsPage() {
                     <Td>{SOURCE_LABEL[c.leadSource as LeadSource] ?? c.leadSource}</Td>
                     <Td>{c.serviceInterest ? SERVICE_LABEL[c.serviceInterest as Service] ?? c.serviceInterest : "—"}</Td>
                     <Td className="tabular text-right">{formatMoney(c.budgetAmount, c.budgetCurrency)}</Td>
-                    <Td>{c.ownerName ?? "Unassigned"}</Td>
+                    <Td><BandBadge band={c.leadBand} score={c.leadScore} /></Td>
+                    <Td>
+                      {c.ownerName ?? <span className="font-medium text-warm">Unassigned</span>}
+                      {!c.ownerName && c.unassignedReason && <div className="max-w-56 text-xs text-muted">{c.unassignedReason}</div>}
+                    </Td>
                     <Td>
                       <StageBadge stage={c.stage} />
                       {c.opportunityCount > 1 && <div className="mt-0.5 text-xs text-muted">{c.opportunityCount} deals</div>}

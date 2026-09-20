@@ -9,13 +9,15 @@ import { SEED_FAILURES, SEED_LEADS, SEED_ROUTING_RULES, SEED_USERS } from "./see
 import { PIPELINE_STAGES, SERVICE_LABEL, STAGE_META, stagePath } from "@/lib/pipeline";
 import { fullName, normalizeEmail, normalizePhone } from "@/lib/normalize";
 import { zonedDateParts, zonedTimeToUtc } from "@/lib/timezone";
+import { processLeadChange } from "@/server/services/lead-intelligence";
+import { SYSTEM_ACTOR } from "@/server/services/types";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const SEED_META = { seed: true } as const;
 
 const TABLES = [
-  "audit_logs", "integration_calls", "messages", "jobs", "workflow_runs", "lead_scores",
+  "audit_logs", "routing_decisions", "integration_calls", "messages", "jobs", "workflow_runs", "lead_scores",
   "onboarding_tasks", "payments", "appointments", "stage_history", "opportunities",
   "contacts", "routing_rules", "pipeline_stages", "users", "webhook_events",
 ];
@@ -23,6 +25,21 @@ const TABLES = [
 export type SeedSummary = Record<string, number>;
 
 export async function seedDatabase(db: Database, now = new Date()): Promise<SeedSummary> {
+  const summary = await insertDemoData(db, now);
+
+  // Phase 3: score every lead and route the unowned ones with the REAL engine
+  // (same code path as the app). Runs after the data transaction has committed.
+  const ids = (await db.select({ id: s.contacts.id }).from(s.contacts)).map((r) => r.id);
+  let routed = 0;
+  for (const id of ids) {
+    const r = await processLeadChange(db, SYSTEM_ACTOR, id, "seed");
+    if (r.errors.length) throw new Error(`Seed scoring/routing failed: ${r.errors.join("; ")}`);
+    if (r.routing && (r.routing.status === "assigned" || r.routing.status === "unassigned")) routed++;
+  }
+  return { ...summary, scored: ids.length, routed_by_engine: routed };
+}
+
+async function insertDemoData(db: Database, now: Date): Promise<SeedSummary> {
   return db.transaction(async (tx) => {
     await tx.execute(sql.raw(`TRUNCATE TABLE ${TABLES.join(", ")} RESTART IDENTITY CASCADE`));
 
@@ -40,7 +57,7 @@ export async function seedDatabase(db: Database, now = new Date()): Promise<Seed
     // 2. Users
     const userRows = await tx
       .insert(s.users)
-      .values(SEED_USERS.map((u) => ({ name: u.name, email: u.email, role: u.role, timezone: u.timezone, services: u.services, regions: u.regions, isAvailable: u.isAvailable, maxOpenLeads: u.maxOpenLeads })))
+      .values(SEED_USERS.map((u) => ({ name: u.name, email: u.email, role: u.role, timezone: u.timezone, services: u.services, regions: u.regions, isActive: u.isActive, isAvailable: u.isAvailable, maxOpenLeads: u.maxOpenLeads })))
       .returning({ id: s.users.id, email: s.users.email });
     const userId = (key: string) => {
       const email = SEED_USERS.find((u) => u.key === key)?.email;
@@ -68,7 +85,8 @@ export async function seedDatabase(db: Database, now = new Date()): Promise<Seed
 
     for (const [i, lead] of SEED_LEADS.entries()) {
       const createdAt = new Date(now.getTime() - lead.createdDaysAgo * DAY - (i % 5) * HOUR - 30 * 60_000);
-      const ownerId = userId(lead.owner);
+      // Brand-new leads have no owner yet — the routing engine assigns them after insert.
+      const ownerId = lead.owner ? userId(lead.owner) : null;
       const name = fullName(lead.firstName, lead.lastName);
 
       // Contact
@@ -88,6 +106,8 @@ export async function seedDatabase(db: Database, now = new Date()): Promise<Seed
           country: lead.country,
           timezone: lead.timezone,
           ownerId,
+          assignmentSource: ownerId ? "seed" : null,
+          assignedAt: ownerId ? createdAt : null,
           tags: [...lead.tags, "demo-data"], // visible label: fictional seed record
           customFields: lead.customFields ?? {},
           notes: lead.notes,
@@ -97,7 +117,9 @@ export async function seedDatabase(db: Database, now = new Date()): Promise<Seed
         .returning({ id: s.contacts.id });
       counts.contacts++;
       audit.push({ eventType: "contact.created", entityType: "contact", entityId: contact.id, contactId: contact.id, actorType: "webhook", actorId: lead.source, message: `Contact created for ${name} from ${lead.source}`, metadata: SEED_META, createdAt });
-      audit.push({ eventType: "owner.assigned", entityType: "contact", entityId: contact.id, contactId: contact.id, actorType: "system", message: `Assigned to ${SEED_USERS.find((u) => u.key === lead.owner)?.name}`, metadata: SEED_META, createdAt: new Date(createdAt.getTime() + 1000) });
+      if (lead.owner) {
+        audit.push({ eventType: "owner.assigned", entityType: "contact", entityId: contact.id, contactId: contact.id, actorType: "system", message: `[demo seed] Pre-assigned to ${SEED_USERS.find((u) => u.key === lead.owner)?.name}`, metadata: SEED_META, createdAt: new Date(createdAt.getTime() + 1000) });
+      }
 
       // Opportunity + stage history
       const path = stagePath(lead.stage, lead.lostAfter);
@@ -219,6 +241,19 @@ export async function seedDatabase(db: Database, now = new Date()): Promise<Seed
         });
         counts.messages++;
         audit.push({ eventType: "message.sent", entityType: "message", contactId: contact.id, actorType: "worker", message: `Email “nurture.${m.key}” sent`, metadata: SEED_META, createdAt: m.at });
+      }
+      // Leads that reached "contacted" replied at least once; later stages replied more.
+      const replies = !path.includes("contacted") ? 0 : path.includes("appointment_booked") ? 2 : 1;
+      for (let r = 0; r < replies; r++) {
+        const at = new Date(stageTimes[path.indexOf("contacted")].getTime() + r * 3 * HOUR);
+        await tx.insert(s.messages).values({
+          contactId: contact.id, workflowRunId: run.id, channel: "email", direction: "inbound",
+          templateKey: "inbound.reply", toAddress: "sales-inbox",
+          body: r === 0 ? `[demo seed] Hi, yes — interested. Can you share pricing?` : `[demo seed] Thanks, the call time works for us.`,
+          status: "sent", idempotencyKey: `seed:reply:${contact.id}:${r}`, attemptedAt: at, createdAt: at,
+        });
+        counts.messages++;
+        audit.push({ eventType: "message.received", entityType: "contact", contactId: contact.id, actorType: "webhook", actorId: "email", message: "[demo seed] Reply received from lead", metadata: SEED_META, createdAt: at });
       }
       if (!running) {
         audit.push({ eventType: "workflow.stopped", entityType: "workflow_run", entityId: run.id, contactId: contact.id, actorType: "system", message: `Workflow stopped: ${stopReason.replace("_", " ")}`, metadata: SEED_META, createdAt: finalAt });

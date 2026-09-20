@@ -8,6 +8,7 @@ import { alias } from "drizzle-orm/pg-core";
 import { getDb } from "@/db/client";
 import * as s from "@/db/schema";
 import { OPEN_STAGES, PIPELINE_STAGES, type PipelineStage } from "@/lib/pipeline";
+import { loadWorkload } from "@/server/services/lead-intelligence";
 
 const owner = alias(s.users, "owner");
 
@@ -44,6 +45,19 @@ export async function getDashboardSummary(now = new Date()) {
       .where(and(gte(s.appointments.startsAt, now), inArray(s.appointments.status, ["scheduled", "confirmed"]))),
     listActivity({ limit: 8 }),
   ]);
+  const [bandRows, unassigned, workload, decisions] = await Promise.all([
+    // Temperature counts only for leads still being worked (open opportunity).
+    db
+      .select({ band: s.contacts.leadBand, n: sql<number>`count(*)::int` })
+      .from(s.contacts)
+      .where(sql`exists (select 1 from opportunities o where o.contact_id = ${s.contacts.id} and o.status = 'open')`)
+      .groupBy(s.contacts.leadBand),
+    listUnassignedLeads(),
+    listRepWorkload(),
+    listRoutingDecisions({ limit: 8 }),
+  ]);
+  const bands = { hot: 0, warm: 0, cold: 0, unscored: 0 };
+  for (const r of bandRows) bands[r.band ?? "unscored"] += r.n;
 
   const byStage = Object.fromEntries(PIPELINE_STAGES.map((st) => [st, { count: 0, value: 0 }])) as Record<PipelineStage, { count: number; value: number }>;
   for (const r of stageRows) byStage[r.stage] = { count: r.count, value: r.value };
@@ -73,7 +87,67 @@ export async function getDashboardSummary(now = new Date()) {
       dead: jobs.dead ?? 0,
     },
     recent,
+    bands,
+    unassigned,
+    workload,
+    decisions,
   };
+}
+
+// ── Scoring & routing views ──────────────────────────────────────────────────
+const contactName = sql<string>`trim(${s.contacts.firstName} || ' ' || coalesce(${s.contacts.lastName}, ''))`;
+
+export async function listUnassignedLeads() {
+  return getDb()
+    .select({
+      id: s.contacts.id,
+      name: contactName,
+      company: s.contacts.company,
+      country: s.contacts.country,
+      serviceInterest: s.contacts.serviceInterest,
+      leadScore: s.contacts.leadScore,
+      leadBand: s.contacts.leadBand,
+      reason: s.contacts.unassignedReason,
+      assignmentSource: s.contacts.assignmentSource,
+    })
+    .from(s.contacts)
+    .where(and(sql`${s.contacts.ownerId} is null`, sql`exists (select 1 from opportunities o where o.contact_id = ${s.contacts.id} and o.status = 'open')`))
+    .orderBy(desc(s.contacts.leadScore));
+}
+
+export async function listRepWorkload() {
+  const db = getDb();
+  const [reps, wl] = await Promise.all([
+    db.select().from(s.users).where(eq(s.users.role, "sales_rep")).orderBy(asc(s.users.name)),
+    loadWorkload(db),
+  ]);
+  return reps.map((u) => ({ ...u, activeLeads: wl.get(u.id) ?? 0 }));
+}
+
+export async function listRoutingDecisions({ limit = 50, contactId }: { limit?: number; contactId?: string } = {}) {
+  const assigned = alias(s.users, "assigned");
+  const previous = alias(s.users, "previous");
+  return getDb()
+    .select({
+      id: s.routingDecisions.id,
+      outcome: s.routingDecisions.outcome,
+      ruleName: s.routingDecisions.ruleName,
+      trigger: s.routingDecisions.trigger,
+      reason: s.routingDecisions.reason,
+      trace: s.routingDecisions.trace,
+      createdAt: s.routingDecisions.createdAt,
+      contactId: s.routingDecisions.contactId,
+      contactName,
+      assignedName: assigned.name,
+      previousName: previous.name,
+    })
+    .from(s.routingDecisions)
+    .innerJoin(s.contacts, eq(s.contacts.id, s.routingDecisions.contactId))
+    .leftJoin(assigned, eq(assigned.id, s.routingDecisions.assignedUserId))
+    .leftJoin(previous, eq(previous.id, s.routingDecisions.previousUserId))
+    .where(contactId ? eq(s.routingDecisions.contactId, contactId) : undefined)
+    .orderBy(desc(s.routingDecisions.createdAt))
+    .limit(limit);
 }
 
 // ── Contacts ─────────────────────────────────────────────────────────────────
@@ -92,6 +166,9 @@ export async function listContacts() {
       budgetAmount: s.contacts.budgetAmount,
       budgetCurrency: s.contacts.budgetCurrency,
       ownerName: owner.name,
+      leadScore: s.contacts.leadScore,
+      leadBand: s.contacts.leadBand,
+      unassignedReason: s.contacts.unassignedReason,
       tags: s.contacts.tags,
       // A contact can have several deals; show the most recent one's stage.
       stage: sql<PipelineStage | null>`(select o.stage from opportunities o where o.contact_id = ${s.contacts.id} order by o.created_at desc limit 1)`,
@@ -115,6 +192,10 @@ export async function getContactDetail(id: string) {
 
   const opps = await db.select().from(s.opportunities).where(eq(s.opportunities.contactId, id)).orderBy(desc(s.opportunities.createdAt));
   const oppIds = opps.map((o) => o.id);
+  const [scoreHistory, routing] = await Promise.all([
+    db.select().from(s.leadScores).where(eq(s.leadScores.contactId, id)).orderBy(desc(s.leadScores.computedAt)).limit(10),
+    listRoutingDecisions({ contactId: id, limit: 20 }),
+  ]);
   const [history, appts, timeline, msgs, runs] = await Promise.all([
     oppIds.length
       ? db.select().from(s.stageHistory).where(inArray(s.stageHistory.opportunityId, oppIds)).orderBy(asc(s.stageHistory.createdAt))
@@ -125,7 +206,7 @@ export async function getContactDetail(id: string) {
     db.select().from(s.workflowRuns).where(eq(s.workflowRuns.contactId, id)).orderBy(desc(s.workflowRuns.startedAt)),
   ]);
 
-  return { ...contact, opportunities: opps, history, appointments: appts, timeline, messages: msgs, workflowRuns: runs };
+  return { ...contact, opportunities: opps, history, appointments: appts, timeline, messages: msgs, workflowRuns: runs, scoreHistory, routing };
 }
 
 // ── Pipeline board ───────────────────────────────────────────────────────────
@@ -146,6 +227,8 @@ export async function getPipelineBoard() {
       contactName: sql<string>`trim(${s.contacts.firstName} || ' ' || coalesce(${s.contacts.lastName}, ''))`,
       company: s.contacts.company,
       ownerName: owner.name,
+      leadScore: s.contacts.leadScore,
+      leadBand: s.contacts.leadBand,
     })
     .from(s.opportunities)
     .innerJoin(s.contacts, eq(s.contacts.id, s.opportunities.contactId))
@@ -255,17 +338,12 @@ export async function listIntegrationCalls(limit = 25) {
 
 export async function listTeamAndRules() {
   const db = getDb();
-  const [team, rules, openCounts] = await Promise.all([
+  const [team, rules, wl] = await Promise.all([
     db.select().from(s.users).orderBy(asc(s.users.name)),
     db.select().from(s.routingRules).orderBy(asc(s.routingRules.priority)),
-    db
-      .select({ ownerId: s.opportunities.ownerId, open: sql<number>`count(*)::int` })
-      .from(s.opportunities)
-      .where(eq(s.opportunities.status, "open"))
-      .groupBy(s.opportunities.ownerId),
+    loadWorkload(db),
   ]);
-  const openByOwner = new Map(openCounts.map((r) => [r.ownerId, r.open]));
-  return { team: team.map((u) => ({ ...u, openLeads: openByOwner.get(u.id) ?? 0 })), rules };
+  return { team: team.map((u) => ({ ...u, openLeads: wl.get(u.id) ?? 0 })), rules };
 }
 
 export async function checkDatabase(): Promise<{ ok: true; latencyMs: number } | { ok: false; error: string }> {

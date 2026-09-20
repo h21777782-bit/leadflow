@@ -5,6 +5,129 @@ Newest phase at the top.
 
 ---
 
+## Phase 3 — Lead scoring & smart routing ✅
+
+**Date:** 2026-09-20
+**Pre-check:** Phase 2 verified before starting — clean git tree, 58/58 tests passing,
+all Phase 2 services present. No missing dependencies.
+
+**Verification (all actually run, all passing):**
+- `npm run typecheck` ✓ · `npm run lint` ✓ (0 warnings) · `npm run build` ✓
+- `npm test` → **114 tests in 10 files** (56 new: 19 scoring unit, 24 routing unit, 13 real-Postgres
+  integration). All 58 Phase 1–2 tests still pass (no regression).
+- Production-server checks: every page 200; form-created lead scored + routed; Settings
+  "unavailable" moved a not-yet-contacted lead and kept an in-conversation lead; reassignment audited.
+- All 5 new server actions called with **React's own `encodeReply`** (the exact browser encoding)
+  against the production server: log reply (score 81 → 84), rep update, missing-capacity
+  rejection, invalid rule (all errors at once), valid rule saved, Route now.
+- `npm run demo:routing` executed end to end against the dev database.
+
+### Completed
+
+**Scoring engine** (`src/lib/scoring.ts`, pure):
+budget 30 · service 20 · engagement 20 · response 15 · appointment 15 = 100.
+Hot ≥70, Warm 40–69, Cold ≤39. Config object with a self-check (`validateScoringConfig`).
+Unknown data gets **neutral credit** (budget 12/30, service 8/20, "not contacted yet" 7/15,
+"no appointment yet" 5/15); invalid numbers (negative, NaN, Infinity) are treated as unknown.
+Only explicit evidence lowers a factor (tiny budget, 2+ unanswered attempts, no-show).
+Every factor carries a human-readable reason.
+
+**Routing engine** (`src/lib/routing.ts`, pure):
+rules in priority order → conditions (service, country, source, min budget) → eligibility
+(active, available, under capacity, optional "must sell the service") → specialist preference →
+fair choice (`assign_user` ordered list / `round_robin` least-recently-assigned /
+`least_loaded` lowest workload ratio; deterministic tie-break). A matched rule with nobody
+eligible falls through to the next rule. No eligible rep → **Unassigned with a reason**, never a
+silent bad assignment. Full rule-by-rule trace kept for every decision.
+
+**Reassignment policy** (`decideRoutingNeed`, explicit and tested):
+no open deal → never · manual owner → never automatically (only "Route now") · no owner → route ·
+owner unavailable/inactive AND lead not contacted yet → reassign · owner unavailable but lead in
+conversation → keep, needs a person · otherwise sticky ownership.
+
+**Persistence & concurrency** (`src/server/services/lead-intelligence.ts`):
+- Score: contact row locked, score/band/timestamp stored on `contacts`, history row in
+  `lead_scores` only when something changed, `lead.scored` audit on change.
+- Routing transaction: lock contact → lock all rep rows in id order (no deadlocks) → count workload
+  under lock → decide → update contact + open opportunities + rep `last_assigned_at` →
+  `routing_decisions` row → audit. Repeating an identical unassigned result is a no-op.
+- Triggers wired into existing services: contact created/updated/merged, opportunity created,
+  stage changed, reply logged, rep availability/capacity changed, routing rule saved, "Route now".
+- Scoring/routing runs **after** the triggering change commits; a failure is audited as
+  `lead_intelligence.failed` and never undoes the contact/deal change.
+
+**UI:** dashboard (Hot/Warm/Cold counts for open leads, Unassigned list with reasons, rep workload
+bars, latest routing decisions) · lead page (score + per-factor breakdown + score history, owner +
+provenance, Unassigned box with **Route now**, routing decisions with rule-by-rule trace,
+**Log a reply** form) · pipeline cards and contacts list show score/band and Unassigned reasons ·
+Settings: per-rep availability/active/capacity form, editable + new routing rules, scoring rules explained.
+
+**Demo:** `npm run demo:routing` (8 steps, real services, fictional leads tagged `demo-scenario`).
+
+### Database changes (migration `drizzle/0001_scoring_routing.sql`)
+
+- New table **`routing_decisions`** (outcome assigned/reassigned/unassigned, assigned & previous rep,
+  rule, trigger, reason, jsonb trace).
+- `contacts`: `lead_score`, `lead_band`, `scored_at`, `assignment_source` (routing/manual/seed),
+  `assigned_at`, `unassigned_reason`; index on `lead_band`.
+- `users`: `is_active`. `messages`: `direction` (outbound/inbound). `lead_scores`: `trigger`, `config_version`.
+- Enum `routing_strategy` + `least_loaded`; new enums `message_direction`, `routing_outcome`.
+- Seed: brand-new leads now have no owner and are routed by the real engine during seeding;
+  contacted leads have `[demo seed]` inbound replies; fallback rule requires service expertise.
+
+### Architectural decisions
+
+| Decision | Why |
+|---|---|
+| Pure engines + thin DB service | Every business rule unit-tested without a DB; the service only loads, locks, persists. |
+| Lock all rep rows (small table) during routing | Simple, provably correct capacity protection. Trade-off: routing is serialized — fine at agency scale; per-rep advisory locks are the scale-up path. |
+| Lock order contact → reps (by id) | Consistent order means two routers cannot deadlock. |
+| Score denormalized on `contacts` + history table | Fast dashboards/lists, and an audit trail of why the score moved. |
+| Sticky ownership | Reassigning a lead someone is already talking to damages the relationship. |
+| Manual assignments are never auto-changed | A human decision beats a rule. "Route now" is the explicit override. |
+| Synchronous post-commit processing | No worker exists yet (Phase 4). Documented; will move to jobs. |
+
+### Errors encountered and fixes
+
+1. **Partial updates silently unassigned leads.** Validation turned `""` into `undefined`, so
+   "ownerId not sent" and "ownerId cleared" looked the same; an update without `ownerId` removed the
+   owner. Fixed: absent `ownerId` = keep owner. Caught by an integration test.
+2. **Manual owner change didn't update the open opportunities' owner** (they drifted apart). Fixed in
+   the same transaction; a test now asserts no open deal's owner differs from its contact's.
+3. **Duplicate score-history rows on every recalculation.** Postgres `jsonb` reorders object keys, so
+   `JSON.stringify` comparison always saw a change. Added `stableStringify` (sorted keys); the same
+   latent bug in the contact field diff (custom fields) was fixed too.
+4. **Capacity silently set to 0.** `Number(null) === 0` when the capacity field was missing. Now rejected
+   with an error. Found during end-to-end testing.
+5. Two test expectations were wrong, not the engine (a lead released by an earlier test was correctly
+   picked up later). Tests now assert the real behaviour with a comment explaining it.
+6. A misleading test (`exact69` asserted 68) was rewritten so names match what is checked.
+7. The demo script's final message claimed "Ben stays with Neha" after Ben had moved; the script now
+   prints what the engine actually did at every step.
+
+### Known limitations (honest)
+
+- **No-JavaScript form fallback hangs** for forms that stay on the page after saving (log reply, rep
+  settings, routing rules): the data IS saved, but the production server (Next 16.3.5) never sends the
+  response. Forms that redirect (create/edit contact) are fine. Normal browsers use the JavaScript path,
+  which was verified. Root cause not investigated yet.
+- Not verified in a real browser (none installable in the sandbox): drag-drop, the rule editor's open/close
+  UI, optimistic updates. Server behaviour of every action was verified.
+- Scoring config is a code constant (versioned), not editable in the UI. Routing rules ARE editable.
+- Engagement uses replies + profile completeness only; email opens/clicks/site visits are not tracked.
+- Replies are logged manually until inbound webhooks exist (Phase 6).
+- Routing runs synchronously in the request; no retry if it fails (audited only) — Phase 4/5.
+- `npm run demo:routing` also re-routes seed leads, so run `npm run db:seed` first for identical output.
+- No authentication (actions attributed to the demo admin).
+
+### Remaining phases
+
+4 job queue + worker + follow-up workflows · 5 HighLevel integration layer + retries/backoff/429 ·
+6 webhooks + signatures + n8n · 7 appointment booking + reminders · 8 failed-automation retry,
+Demo Scenario, dashboard polish · 9 FAILURE_STORY.md and final docs.
+
+---
+
 ## Phase 2 — Contacts, duplicates, opportunities, stage changes, audit ✅
 
 **Date:** 2026-09-19

@@ -165,7 +165,48 @@ npx vitest run tests/services.integration.test.ts
 Point at: *creates exactly ONE contact when the same lead is submitted 5 times concurrently*
 and *serializes two simultaneous drags of the same card*.
 
-## 9. Reset before an interview
+## 9. Phase 3 — scoring & routing
+
+> DEMO SCENARIO with fictional leads. Every step runs the real services and writes to the database.
+
+### 9a. Start fresh
+```bash
+npm run db:migrate      # applies 0001_scoring_routing.sql if you are upgrading from Phase 2
+npm run db:seed         # scores all 24 leads; routes the 4 brand-new ones with the real engine
+npm run dev
+```
+
+### 9b. One-command terminal demo
+```bash
+npm run db:seed && npm run demo:routing
+```
+Prints 8 steps: new lead scored + assigned → budget change (score up, owner sticky) → reply
+(Warm → Hot) → CRM lead to Daniel → Daniel unavailable (not-contacted leads move) → Neha unavailable
+(new CRM lead stays Unassigned with reason) → Daniel back (waiting leads assigned) → Neha back.
+
+### 9c. In the browser
+Follow "Step-by-step live demo" in `INTERVIEW_GUIDE.md`. What to check on each screen:
+- `/dashboard`: Lead temperature, Unassigned leads + reasons, rep workload, routing decisions
+- lead page: Lead score panel (5 factors with reasons, score history), Ownership & routing
+  (provenance, Route now if unassigned, rule-by-rule trace), Log a reply
+- `/settings`: Available / Active / Capacity per rep; Edit / Add a routing rule; scoring rules explained
+- `/pipeline` and `/contacts`: Hot/Warm/Cold badge with score on every lead
+
+### 9d. Tests
+```bash
+npx vitest run tests/scoring.test.ts tests/routing.test.ts        # 43 pure-logic tests, no DB
+npx vitest run tests/lead-intelligence.integration.test.ts         # 13 real-DB tests (needs TEST_DATABASE_URL)
+npm run verify                                                     # everything + build
+```
+
+### 9e. Inspect the database directly (optional)
+```sql
+select first_name, lead_score, lead_band, assignment_source, unassigned_reason from contacts order by lead_score desc;
+select outcome, rule_name, trigger, reason from routing_decisions order by created_at desc limit 10;
+select event_type, message from audit_logs where event_type in ('lead.scored','owner.assigned','owner.reassigned','lead.unassigned') order by created_at desc limit 10;
+```
+
+## 10. Reset before an interview
 
 ```bash
 npm run db:seed        # restores the exact demo dataset

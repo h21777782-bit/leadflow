@@ -16,7 +16,8 @@
     "db:reset": "npm run db:migrate && npm run db:seed",
     "db:studio": "drizzle-kit studio",
     "verify": "npm run typecheck && npm run lint && npm run test && npm run build",
-    "env:check": "tsx scripts/check-env.ts"
+    "env:check": "tsx scripts/check-env.ts",
+    "demo:routing": "tsx scripts/demo-routing.ts"
   },
   "dependencies": {
     "@fontsource/ibm-plex-sans": "^5.3.0",

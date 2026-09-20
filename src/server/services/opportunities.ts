@@ -13,6 +13,7 @@ import { PIPELINE_STAGES, STAGE_META, type PipelineStage } from "@/lib/pipeline"
 import { decideStageChange } from "@/lib/stage-rules";
 import type { FieldErrors } from "@/lib/validation/contact";
 import { writeAudit } from "./audit";
+import { processLeadChange } from "./lead-intelligence";
 import { insertOpportunity } from "./contacts";
 import type { Actor } from "./types";
 
@@ -39,7 +40,7 @@ export async function createOpportunity(
     for (const i of parsed.error.issues) errors[String(i.path[0] ?? "form")] ??= i.message;
     return { status: "invalid", errors };
   }
-  return db.transaction(async (tx) => {
+  const r = await db.transaction(async (tx) => {
     const [c] = await tx.select().from(contacts).where(eq(contacts.id, contactId));
     if (!c) return { status: "not_found" as const };
     const id = await insertOpportunity(tx, actor, {
@@ -51,6 +52,8 @@ export async function createOpportunity(
     });
     return { status: "created" as const, opportunityId: id };
   });
+  if (r.status === "created") await processLeadChange(db, actor, contactId, "opportunity.created");
+  return r;
 }
 
 // ── Stage change ─────────────────────────────────────────────────────────────
@@ -71,6 +74,16 @@ export type ChangeStageResult =
 const isStage = (v: string): v is PipelineStage => (PIPELINE_STAGES as readonly string[]).includes(v);
 
 export async function changeStage(db: Database, actor: Actor, input: ChangeStageInput): Promise<ChangeStageResult> {
+  const r = await changeStageTx(db, actor, input);
+  if (r.status === "changed") {
+    // Stage affects the appointment factor and whether the lead still needs an owner.
+    const [o] = await db.select({ contactId: opportunities.contactId }).from(opportunities).where(eq(opportunities.id, input.opportunityId));
+    if (o) await processLeadChange(db, actor, o.contactId, "stage.changed");
+  }
+  return r;
+}
+
+async function changeStageTx(db: Database, actor: Actor, input: ChangeStageInput): Promise<ChangeStageResult> {
   if (!isStage(input.toStage)) return { status: "invalid", error: `Unknown stage “${input.toStage}”` };
   const to = input.toStage;
   const reason = input.reason?.trim() || null;

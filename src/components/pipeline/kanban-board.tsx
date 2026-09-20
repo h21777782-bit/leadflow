@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { startTransition, useOptimistic, useState, type DragEvent } from "react";
 import { moveStageAction } from "@/app/actions/opportunities";
+import { BandBadge } from "@/components/ui/badges";
 import { formatMoney } from "@/lib/format";
 import { PIPELINE_STAGES, SOURCE_LABEL, STAGE_META, type LeadSource, type PipelineStage } from "@/lib/pipeline";
 
@@ -19,6 +20,8 @@ export type BoardCard = {
   nextAction: string | null;
   lostReason: string | null;
   activityLabel: string;
+  leadScore: number | null;
+  leadBand: "hot" | "warm" | "cold" | null;
 };
 
 type Move = { cardId: string; to: PipelineStage };
@@ -119,13 +122,16 @@ export function KanbanBoard({ cards }: { cards: BoardCard[] }) {
                       }}
                       className="cursor-grab rounded-md border border-line bg-surface p-3 active:cursor-grabbing"
                     >
-                      <Link href={`/contacts/${c.contactId}`} className="font-medium text-ink hover:text-accent hover:underline">
-                        {c.contactName}
-                      </Link>
+                      <div className="flex items-start justify-between gap-2">
+                        <Link href={`/contacts/${c.contactId}`} className="font-medium text-ink hover:text-accent hover:underline">
+                          {c.contactName}
+                        </Link>
+                        <BandBadge band={c.leadBand} score={c.leadScore} />
+                      </div>
                       <p className="text-[13px] text-muted">{c.company}</p>
                       <div className="mt-2 flex items-baseline justify-between text-[13px]">
                         <span className="tabular font-medium">{formatMoney(c.valueAmount, c.currency)}</span>
-                        <span className="text-muted">{c.ownerName ?? "Unassigned"}</span>
+                        <span className={c.ownerName ? "text-muted" : "font-medium text-warm"}>{c.ownerName ?? "Unassigned"}</span>
                       </div>
                       <p className="mt-1 text-xs text-faint">
                         {SOURCE_LABEL[c.leadSource as LeadSource] ?? c.leadSource}, active {c.activityLabel}

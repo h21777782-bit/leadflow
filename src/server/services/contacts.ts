@@ -15,9 +15,11 @@ import type { Database } from "@/db/client";
 import { uniqueViolation } from "@/db/errors";
 import { contacts, opportunities, stageHistory, users } from "@/db/schema";
 import { fullName } from "@/lib/normalize";
+import { stableStringify } from "@/lib/stable-json";
 import { SERVICE_LABEL, type Service } from "@/lib/pipeline";
 import { validateContact, type FieldErrors, type ValidContact } from "@/lib/validation/contact";
 import { writeAudit } from "./audit";
+import { processLeadChange, type LeadChangeOutcome } from "./lead-intelligence";
 import type { Actor, DbOrTx } from "./types";
 
 type ContactRow = typeof contacts.$inferSelect;
@@ -34,21 +36,21 @@ export type DuplicateMatch = {
 export type CreateContactResult =
   | { status: "invalid"; errors: FieldErrors }
   | { status: "duplicate"; matches: DuplicateMatch[]; raceDetected?: boolean }
-  | { status: "created"; contactId: string; opportunityId: string | null };
+  | { status: "created"; contactId: string; opportunityId: string | null; intelligence: LeadChangeOutcome };
 
 export type UpdateContactResult =
   | { status: "invalid"; errors: FieldErrors }
   | { status: "not_found" }
   | { status: "duplicate"; matches: DuplicateMatch[] }
   | { status: "unchanged"; contactId: string }
-  | { status: "updated"; contactId: string; changedFields: string[] };
+  | { status: "updated"; contactId: string; changedFields: string[]; intelligence: LeadChangeOutcome };
 
 export type MergeContactResult =
   | { status: "invalid"; errors: FieldErrors }
   | { status: "not_found" }
   | { status: "duplicate"; matches: DuplicateMatch[] }
   | { status: "unchanged"; contactId: string }
-  | { status: "merged"; contactId: string; changedFields: string[] };
+  | { status: "merged"; contactId: string; changedFields: string[]; intelligence: LeadChangeOutcome };
 
 // ── Duplicate detection ──────────────────────────────────────────────────────
 export async function findDuplicates(
@@ -125,10 +127,19 @@ export async function createContact(
   const matches = await findDuplicates(db, c);
   if (matches.length) return { status: "duplicate", matches };
 
+  let created: { contactId: string; opportunityId: string | null };
   try {
-    return await db.transaction(async (tx) => {
+    created = await db.transaction(async (tx) => {
       const name = fullName(c.firstName, c.lastName);
-      const [contact] = await tx.insert(contacts).values(toColumns(c)).returning({ id: contacts.id });
+      const [contact] = await tx
+        .insert(contacts)
+        .values({
+          ...toColumns(c),
+          // An owner chosen on the form is a human decision → routing will not override it.
+          assignmentSource: c.ownerId ? "manual" : null,
+          assignedAt: c.ownerId ? sql`now()` : null,
+        })
+        .returning({ id: contacts.id });
       await writeAudit(tx, actor, {
         eventType: "contact.created",
         entityType: "contact",
@@ -148,7 +159,7 @@ export async function createContact(
           leadSource: c.leadSource,
         });
       }
-      return { status: "created" as const, contactId: contact.id, opportunityId };
+      return { contactId: contact.id, opportunityId };
     });
   } catch (err) {
     const constraint = uniqueViolation(err);
@@ -159,6 +170,9 @@ export async function createContact(
     }
     throw err;
   }
+  // Committed. Now score + route (separate transactions; failure is audited, never undoes the create).
+  const intelligence = await processLeadChange(db, actor, created.contactId, "contact.created");
+  return { status: "created", ...created, intelligence };
 }
 
 // ── Opportunity insert (shared with opportunities service) ──────────────────
@@ -199,7 +213,8 @@ const COMPARABLE: (keyof Patch)[] = [
 ];
 
 function sameValue(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  // stableStringify: jsonb (customFields) comes back from Postgres with reordered keys.
+  return stableStringify(a ?? null) === stableStringify(b ?? null);
 }
 
 export function diffFields(existing: ContactRow, patch: Patch): string[] {
@@ -258,7 +273,29 @@ async function applyPatch(
     const changed = diffFields(existing, patch);
     if (changed.length === 0) return { status: "unchanged" as const };
 
-    await tx.update(contacts).set({ ...patch, updatedAt: sql`now()` }).where(eq(contacts.id, id));
+    const ownerChanged = changed.includes("ownerId");
+    await tx
+      .update(contacts)
+      .set({
+        ...patch,
+        updatedAt: sql`now()`,
+        // A person changed the owner → mark as manual so automatic routing leaves it alone.
+        ...(ownerChanged
+          ? {
+              assignmentSource: "manual",
+              assignedAt: patch.ownerId ? sql`now()` : null,
+              unassignedReason: patch.ownerId ? null : "Unassigned manually — use Route now to auto-assign",
+            }
+          : {}),
+      })
+      .where(eq(contacts.id, id));
+    if (ownerChanged) {
+      // Open deals follow the contact's owner.
+      await tx
+        .update(opportunities)
+        .set({ ownerId: patch.ownerId ?? null })
+        .where(and(eq(opportunities.contactId, id), eq(opportunities.status, "open")));
+    }
     const name = fullName(patch.firstName ?? existing.firstName, patch.lastName ?? existing.lastName);
     await writeAudit(tx, actor, {
       eventType,
@@ -296,10 +333,21 @@ export async function updateContact(db: Database, actor: Actor, id: string, rawI
   if (matches.length) return { status: "duplicate", matches };
 
   try {
-    const r = await applyPatch(db, actor, id, () => toColumns(v.data), "contact.updated");
+    // "ownerId" absent from the input = keep the current owner. Only an explicit
+    // value (a rep id, or "" meaning Unassigned) changes ownership. Without this,
+    // a partial update (e.g. a future webhook) would silently unassign the lead.
+    const ownerSent = typeof rawInput === "object" && rawInput !== null && "ownerId" in rawInput;
+    const r = await applyPatch(
+      db,
+      actor,
+      id,
+      (existing) => ({ ...toColumns(v.data), ...(ownerSent ? {} : { ownerId: existing.ownerId }) }),
+      "contact.updated",
+    );
     if (r.status === "not_found") return r;
     if (r.status === "unchanged") return { status: "unchanged", contactId: id };
-    return { status: "updated", contactId: id, changedFields: r.changedFields };
+    const intelligence = await processLeadChange(db, actor, id, "contact.updated");
+    return { status: "updated", contactId: id, changedFields: r.changedFields, intelligence };
   } catch (err) {
     if (uniqueViolation(err)?.startsWith("contacts_")) {
       return { status: "duplicate", matches: await findDuplicates(db, { ...v.data, excludeId: id }) };
@@ -321,7 +369,8 @@ export async function mergeIntoContact(db: Database, actor: Actor, id: string, r
     const r = await applyPatch(db, actor, id, (existing) => buildMergePatch(existing, v.data), "contact.merged");
     if (r.status === "not_found") return r;
     if (r.status === "unchanged") return { status: "unchanged", contactId: id };
-    return { status: "merged", contactId: id, changedFields: r.changedFields };
+    const intelligence = await processLeadChange(db, actor, id, "contact.merged");
+    return { status: "merged", contactId: id, changedFields: r.changedFields, intelligence };
   } catch (err) {
     if (uniqueViolation(err)?.startsWith("contacts_")) {
       return { status: "duplicate", matches: await findDuplicates(db, { ...v.data, excludeId: id }) };

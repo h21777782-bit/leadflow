@@ -55,3 +55,14 @@ export function StatusBadge({ status }: { status: string }) {
   const label = STATUS_LABEL[status] ?? status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, " ");
   return <Badge tone={STATUS_TONE[status] ?? "neutral"}>{label}</Badge>;
 }
+
+export function BandBadge({ band, score }: { band: "hot" | "warm" | "cold" | null; score?: number | null }) {
+  if (!band) return <Badge>Not scored</Badge>;
+  const label = band === "hot" ? "Hot" : band === "warm" ? "Warm" : "Cold";
+  return (
+    <Badge tone={band}>
+      {label}
+      {score != null && <span className="tabular ml-1 font-semibold">{score}</span>}
+    </Badge>
+  );
+}
