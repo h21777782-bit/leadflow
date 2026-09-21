@@ -67,6 +67,11 @@ docker compose up -d
 | `npm run db:reset` | migrate + seed |
 | `npm run db:studio` | Drizzle Studio (browse tables) |
 | `npm run demo:routing` | DEMO SCENARIO: runs scoring + routing through the real services with fictional leads |
+| `npm run worker` | Long-running background worker (separate process — required for follow-ups to send) |
+| `npm run worker:once` | Process currently due jobs once and exit (used by the demo scripts) |
+| `npm run demo:a` | DEMO: success path — new lead → scored/routed → follow-up → worker → simulated send |
+| `npm run demo:b` | DEMO: simulated failure → retry → recovery (proves exactly one message despite the failure) |
+| `npm run demo:c` | DEMO: lead replies → follow-up skipped, workflow stopped |
 
 ---
 
@@ -91,6 +96,13 @@ message listing every invalid variable. Secrets are never shown in the UI.
 | `HIGHLEVEL_API_VERSION` | no | Defaults to `2021-07-28` (sent as the `Version` header) |
 | `HIGHLEVEL_WEBHOOK_PUBLIC_KEY` | later phases | Ed25519 key for `X-GHL-Signature` verification |
 | `WEBHOOK_SIGNING_SECRET` | later phases | HMAC secret for website / n8n webhooks |
+| `FOLLOWUP_1_DELAY_SECONDS` | no (`30`) | Delay before the first follow-up (kept short for demos) |
+| `JOB_MAX_ATTEMPTS` | no (`5`) | Retries before a job is marked `failed` |
+| `RETRY_BASE_DELAY_SECONDS` / `RETRY_MAX_DELAY_SECONDS` | no (`15` / `3600`) | Exponential backoff bounds |
+| `JOB_LEASE_SECONDS` | no (`60`) | How long a claimed job is protected before it's considered abandoned |
+| `WORKER_POLL_MS` | no (`2000`) | How often the worker checks for due jobs when idle |
+| `WORKER_BATCH_SIZE` | no (`5`) | Jobs claimed per poll |
+| `DATABASE_PREPARE` | no (`true`) | Set `false` on Supabase's transaction pooler (port 6543), which doesn't support prepared statements |
 
 The HighLevel values are re-verified against the official docs in Phase 5,
 before any real API call is written.
@@ -112,23 +124,47 @@ Browser ──► pages (server components) ──► src/server/queries   (read
                           src/db (Drizzle) ──► PostgreSQL
 ```
 
-Planned (later phases): webhook routes → `webhook_events` (dedupe) → `jobs`
-table (Postgres queue) → worker → routing / scoring / follow-ups → `CrmProvider`
-interface → Mock or HighLevel provider.
+Built as of Phase 4: `contacts.created` (and intake events) also start a **workflow run** →
+one **job** per follow-up step in a Postgres-backed queue → a **separate worker process**
+(`npm run worker`, not part of the web app) claims due jobs with `SKIP LOCKED`, runs the
+`new_lead_nurture` handler, retries transient failures with backoff, and stops on reply /
+appointment / won / lost / opt-out / manual cancel. Messaging is a `MessagingProvider`
+interface with only a `MockMessagingProvider` implementation so far (real providers arrive
+in Phase 5, behind the same interface HighLevel's `CrmProvider` will use).
+
+```
+Web app (Vercel-shaped, request/response only)      Worker (Railway-shaped, always-on)
+   │ writes jobs                                        │ polls Postgres every WORKER_POLL_MS
+   ▼                                                     ▼
+                    PostgreSQL: jobs, job_attempts, workflow_runs, messages
+```
+
+The worker cannot run inside a Vercel serverless function — those are killed shortly after
+each response, and the worker is an infinite poll loop. See `IMPLEMENTATION_LOG.md` (Phase 4,
+"Deployment notes") for the Vercel/Supabase/Railway split actually exercised locally as two
+separate OS processes; the full step-by-step deployment guide is Phase 9's `DEPLOYMENT.md`
+(nothing has been deployed yet).
+
+Planned (later phases): webhook routes → `webhook_events` (dedupe) → `CrmProvider`
+interface → Mock or HighLevel provider, appointment booking, ops/reporting screens.
 
 ### Folder map
 
 ```
 src/
-  app/(app)/…            pages (Dashboard, Contacts, Lead details, Pipeline, …)
+  app/(app)/…            pages (Dashboard, Contacts, Lead details, Pipeline, Automations, …)
   app/api/health         liveness + DB check (503 when DB is down)
   components/            sidebar + small UI primitives
   db/schema.ts           full database schema (all phases)
   db/seed-data.ts        demo dataset (pure data, unit-tested)
   db/seed.ts             transactional seed routine
-  lib/                   env validation, normalization, timezone, pipeline constants
+  lib/                   env validation, normalization, timezone, pipeline constants, backoff, job-errors
   server/queries/        read-side data access used by pages
-scripts/                 migrate / seed CLIs
+  server/queue/          job queue (enqueue, claim, complete/fail, recovery)
+  server/worker/         worker runtime (handler registry, poll loop)
+  server/workflows/      nurture (follow-up) workflow
+  server/integrations/   messaging provider interface + mock implementation
+scripts/                 migrate / seed / worker / demo CLIs
 drizzle/                 generated SQL migrations (committed)
 tests/                   Vitest unit + DB integration tests
 ```

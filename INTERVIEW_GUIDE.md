@@ -5,7 +5,7 @@
 > All data is fictional. Failure scenarios are demo/test scenarios run locally.
 
 The full project walkthrough (2-minute and 5-minute versions) will be added in Phase 9.
-This file currently covers **Phase 3: scoring and routing**.
+This file currently covers **Phase 3: scoring and routing** and **Phase 4: the automation engine**.
 
 ---
 
@@ -65,3 +65,53 @@ Before the interview: `npm run db:seed` then `npm run dev`.
 8. Terminal: `npx vitest run tests/lead-intelligence.integration.test.ts` → point at the concurrency and capacity tests.
 
 Alternative: `npm run db:seed && npm run demo:routing` runs the same story in the terminal through the real services.
+
+---
+
+## Phase 4: automation engine — 2-minute explanation (say this)
+
+"Once a lead is scored and routed, it enters a follow-up workflow: three emails, spaced out — a short delay, then a day later, then three days later — unless the lead replies, books an appointment, the deal closes, or they opt out, in which case it stops and records exactly why. That's built on a persistent job queue in Postgres, not an in-memory scheduler, because the web app and the worker that actually sends messages are two separate processes — Vercel serverless functions don't stay alive to run a polling loop, so a background worker has to be its own always-on service.
+
+The queue guarantees three things I specifically tested against a real database, not mocks. First, no two workers ever claim the same job — claiming is one atomic UPDATE using `SELECT … FOR UPDATE SKIP LOCKED`, so concurrent workers just skip each other's locked rows. Second, every send is idempotent — each message has a unique key, so if a job is retried after a crash, the handler checks whether that message already went out before sending again. Third, a worker that hangs can't corrupt state: its lease expires, another process recovers the job, and if the original worker eventually wakes up and tries to finish it, the completion is refused because it no longer holds the lease.
+
+Failures are classified transient or permanent. Transient errors — a simulated 503 — get exponential backoff with jitter and retry up to 5 attempts before failing for good. Permanent errors — like no address to send to — fail immediately, because retrying can't help. Everything is visible on an Automations page: worker heartbeats, job counts, a Retry Now button, and a demo switch that forces the mock provider to fail on command, so I can show a failure and its recovery live instead of just describing it."
+
+---
+
+## Automation engine — technical questions with accurate answers
+
+**1. Why is the job queue a Postgres table instead of an in-memory queue or something like Redis/BullMQ?**
+> Two reasons. The practical one: the web app and the worker are separate processes (the worker can't live inside a Vercel function), so the queue has to be somewhere both can see — a database, not memory. The architectural one: I get transactional guarantees for free — enqueueing a job in the same transaction as the row that triggered it means I can never end up with a contact but no follow-up, or a follow-up with no contact. A dedicated queue product would be a reasonable upgrade at real scale, but at this volume Postgres with `SKIP LOCKED` is a well-known, simple pattern and it's one less moving part to operate.
+
+**2. Walk me through exactly how two workers avoid claiming the same job.**
+> `claimDueJobs` is a single SQL statement: an `UPDATE jobs SET status = 'processing' … WHERE id IN (SELECT id FROM jobs WHERE … FOR UPDATE SKIP LOCKED)`. Because it's one statement, Postgres handles the locking atomically — the subquery locks the rows it's about to update, and `SKIP LOCKED` means a second worker running the exact same statement concurrently simply doesn't see rows the first worker already locked; it gets the next ones instead. I proved this with a test: 6 due jobs, 4 "workers" claiming concurrently via `Promise.all`, and the claimed IDs across all four batches are a set with no duplicates and full coverage.
+
+**3. What happens if a worker crashes mid-job?**
+> Every claim sets a lease (`lease_expires_at`, 60 seconds by default). If the worker dies, nothing updates that job further — it just sits in `processing` until the lease expires. The next worker to run its loop calls `recoverAbandonedJobs()`, which finds jobs stuck in `processing` past their lease and puts them back to `retry_scheduled` (or `failed` if attempts are exhausted), with an `abandoned` row in the attempt history so the audit trail shows *why* it was retried. I tested the more subtle case too: what if the original worker isn't actually dead, just slow, and it finally finishes and tries to complete the job *after* it's been recovered? The completion is a conditional UPDATE — `WHERE locked_by = me AND status = 'processing'` — and since the status has moved on, it matches zero rows and the stale result is discarded rather than overwriting the newer state.
+
+**4. How do you guarantee a message is never sent twice, even with retries?**
+> Every outgoing message has a unique idempotency key (`wf:<runId>:<stepKey>`) with a UNIQUE index in the database. The handler always checks for an existing row with that key before sending: if one exists and its status is `sent`, it logs "already sent" and skips sending again, but *still* re-runs the rest of the step (advancing the workflow, scheduling the next one) — because if the job is being retried, something before or after the actual network call must have failed, not the send itself. I tested this by calling the handler function directly twice for the same job — same as what happens if a process crashes right after the provider call succeeds but before the job is marked complete — and asserted exactly one message row and exactly one next-step job exist afterward.
+
+**5. Why classify errors as transient vs. permanent instead of always retrying?**
+> Because retrying a permanent error just wastes the retry budget and delays the person finding out. An invalid recipient, or a job type the worker has no handler for, will fail identically on attempt 5 as attempt 1 — so those fail immediately and go straight to Failed Automations with a clear "why", rather than sitting in a fake retry loop for hours. Transient errors (timeouts, 5xx, 429) get exponential backoff with jitter — the jitter matters because if a real outage fails 100 jobs at once, pure exponential backoff would retry all 100 at exactly the same instant again; equal jitter spreads them out while keeping a guaranteed minimum wait.
+
+**Likely follow-ups**
+- *"Why Postgres advisory locks / SKIP LOCKED instead of `SELECT ... FOR UPDATE NOWAIT`?"* → `NOWAIT` would make a second worker's whole claim attempt error out if it hits any locked row. `SKIP LOCKED` just moves past locked rows and claims what's actually free, which is exactly the "give me whatever's available" semantics a worker pool needs.
+- *"What's `MOCK_MODE` for?"* → Phase 4 has no real messaging provider — sends are simulated and clearly labelled everywhere (`[SIMULATED]`, a `SIMULATED` badge on the Automations page). The demo failure switch (off/transient/permanent) only works when `MOCK_MODE=true`, so it can never accidentally affect a real integration once Phase 5 adds one.
+- *"Why can't the worker run on Vercel?"* → Vercel functions are request-scoped: they start to handle one request and can be frozen or killed right after responding. The worker is an infinite loop that polls the database every couple of seconds whether or not a request is in flight — that needs an always-on process (Railway/Render/Fly), which is also exactly what I ran in the two-process test below.
+- *"What did you actually verify, versus just write tests for?"* → I ran two separate OS processes locally — a production web server and `npm run worker` — created a lead through a real HTTP request to the web server, and watched the *other* process's log claim and complete the job, then confirmed the dashboard (served by the first process) showed the result. That's the one thing unit and integration tests can't prove by themselves: that the processes are genuinely independent and only coordinate through Postgres.
+
+---
+
+## Step-by-step live demo — Phase 4 (≈3 minutes)
+
+Before the interview: `npm run db:seed`, then in two terminals `npm run dev` and `npm run worker`.
+
+1. **`/automations`** → point at worker status (online, from its heartbeat), job counts, the editable follow-up delays, and the demo failure switch.
+2. Flip the failure switch to **transient**, then run `npm run demo:b` in a third terminal (or create a lead in the UI and wait ~30s) → the job fails with a simulated 503, shown with its exact error and next retry time.
+3. Flip the switch back to **off**, click **Retry Now** on the job → it completes; point out the attempt history shows both the failed and the successful attempt, and exactly one message exists despite two attempts.
+4. **`/failed-automations`** → any row without a worker handler explains why retrying it can't succeed, instead of just failing silently again.
+5. Create a lead, then immediately log a reply on its page → run `npm run worker:once` (or wait for the running worker) → the follow-up is skipped with reason "Lead replied", and the workflow shows **Stopped**.
+6. Terminal: `npx vitest run tests/automation.integration.test.ts` → point at *concurrent claiming by several workers never claims the same job twice* and *a stale worker cannot overwrite the result once its lease has been recovered*.
+
+Alternative, fully scripted: `npm run demo:a && npm run demo:b && npm run demo:c` runs the success, failure/retry, and cancellation stories back to back through the real services.

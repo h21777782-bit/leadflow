@@ -7,6 +7,7 @@ import { and, asc, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { getDb } from "@/db/client";
 import * as s from "@/db/schema";
+import { getEnv } from "@/lib/env";
 import { OPEN_STAGES, PIPELINE_STAGES, type PipelineStage } from "@/lib/pipeline";
 import { loadWorkload } from "@/server/services/lead-intelligence";
 
@@ -330,9 +331,9 @@ export async function listFailedJobs() {
   return listJobs({ statuses: ["failed", "retry_scheduled"] });
 }
 
-export async function getAutomationOverview() {
+export async function getAutomationOverview(now = new Date()) {
   const db = getDb();
-  const [jobCounts, runCounts, workers, failureMode, steps, messagesOut] = await Promise.all([
+  const [jobCounts, runCounts, workerRows, failureMode, steps, messagesOut] = await Promise.all([
     db.select({ status: s.jobs.status, n: sql<number>`count(*)::int` }).from(s.jobs).groupBy(s.jobs.status),
     db.select({ status: s.workflowRuns.status, n: sql<number>`count(*)::int` }).from(s.workflowRuns).groupBy(s.workflowRuns.status),
     db.select().from(s.workerHeartbeats).orderBy(desc(s.workerHeartbeats.lastSeenAt)).limit(5),
@@ -360,6 +361,9 @@ export async function getAutomationOverview() {
       .orderBy(desc(sql`coalesce(${s.messages.attemptedAt}, ${s.messages.createdAt})`))
       .limit(20),
   ]);
+  const onlineThresholdMs = Math.max(10_000, getEnv().WORKER_POLL_MS * 3);
+  const workers = workerRows.map((w) => ({ ...w, online: w.status === "running" && now.getTime() - w.lastSeenAt.getTime() < onlineThresholdMs }));
+
   return {
     jobs: Object.fromEntries(jobCounts.map((r) => [r.status, r.n])) as Partial<Record<JobStatus, number>>,
     runs: Object.fromEntries(runCounts.map((r) => [r.status, r.n])) as Record<string, number>,

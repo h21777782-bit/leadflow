@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { connection } from "next/server";
+import { RetryJobButton } from "@/components/automations/controls";
 import { StatusBadge } from "@/components/ui/badges";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState, Panel } from "@/components/ui/panel";
@@ -8,6 +9,7 @@ import { Table, Td, Th } from "@/components/ui/table";
 import { getEnv } from "@/lib/env";
 import { formatDateTime } from "@/lib/format";
 import { listFailedJobs } from "@/server/queries";
+import { SUPPORTED_JOB_TYPES } from "@/server/worker/runner";
 
 export const metadata: Metadata = { title: "Failed automations" };
 
@@ -36,23 +38,34 @@ export default async function FailedAutomationsPage() {
                   <Th>Error</Th>
                   <Th className="text-right">Retries</Th>
                   <Th>Status</Th>
+                  <Th>Retry</Th>
                 </tr>
               </thead>
               <tbody>
-                {jobs.map((j) => (
-                  <tr key={j.id}>
-                    <Td className="whitespace-nowrap font-medium">{j.type}</Td>
-                    <Td>
-                      {j.contactId ? (
-                        <Link href={`/contacts/${j.contactId}`} className="text-accent hover:underline">{j.contactName}</Link>
-                      ) : "—"}
-                    </Td>
-                    <Td className="tabular whitespace-nowrap text-[13px]">{formatDateTime(j.createdAt, tz)}</Td>
-                    <Td className="max-w-md text-[13px] text-bad">{j.lastError}</Td>
-                    <Td className="tabular text-right">{j.attempts} / {j.maxAttempts}</Td>
-                    <Td><StatusBadge status={j.status} /></Td>
-                  </tr>
-                ))}
+                {jobs.map((j) => {
+                  const retryable = SUPPORTED_JOB_TYPES.includes(j.type);
+                  return (
+                    <tr key={j.id}>
+                      <Td className="whitespace-nowrap font-medium">{j.type}</Td>
+                      <Td>
+                        {j.contactId ? (
+                          <Link href={`/contacts/${j.contactId}`} className="text-accent hover:underline">{j.contactName}</Link>
+                        ) : "—"}
+                      </Td>
+                      <Td className="tabular whitespace-nowrap text-[13px]">{formatDateTime(j.createdAt, tz)}</Td>
+                      <Td className="max-w-md text-[13px] text-bad">{j.lastError}</Td>
+                      <Td className="tabular text-right">{j.attempts} / {j.maxAttempts}</Td>
+                      <Td><StatusBadge status={j.status} /></Td>
+                      <Td>
+                        {retryable ? (
+                          <RetryJobButton jobId={j.id} contactId={j.contactId ?? undefined} />
+                        ) : (
+                          <p className="max-w-[14rem] text-[13px] text-muted">No worker handler exists for “{j.type}” jobs yet, so retrying cannot succeed.</p>
+                        )}
+                      </Td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </Table>
           )}

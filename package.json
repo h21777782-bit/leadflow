@@ -18,6 +18,9 @@
     "verify": "npm run typecheck && npm run lint && npm run test && npm run build",
     "env:check": "tsx scripts/check-env.ts",
     "demo:routing": "tsx scripts/demo-routing.ts",
+    "demo:a": "tsx scripts/demo-a.ts",
+    "demo:b": "tsx scripts/demo-b.ts",
+    "demo:c": "tsx scripts/demo-c.ts",
     "worker": "tsx scripts/worker.ts",
     "worker:once": "tsx scripts/worker.ts --once"
   },

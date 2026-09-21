@@ -15,6 +15,7 @@ import { NewOpportunityForm } from "@/components/pipeline/new-opportunity-form";
 import { StageControl } from "@/components/pipeline/stage-control";
 import { ScorePanel } from "@/components/lead/score-panel";
 import { LogReplyForm, RouteNowButton } from "@/components/lead/lead-intel-actions";
+import { CancelWorkflowButton, OptOutToggle } from "@/components/automations/controls";
 import { isUuid } from "@/lib/ids";
 
 export const metadata: Metadata = { title: "Lead details" };
@@ -210,6 +211,41 @@ export default async function LeadDetailsPage({ params, searchParams }: PageProp
                       <p>{e.message}</p>
                       <p className="text-xs text-faint">{e.eventType} by {e.actorType}</p>
                     </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </Panel>
+
+          <Panel title="Follow-up automation" description="The new-lead nurture workflow for this contact.">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <OptOutToggle contactId={c.id} optedOut={Boolean(c.optedOutAt)} />
+              {data.workflowRuns.find((r) => r.status === "running") && (
+                <CancelWorkflowButton runId={data.workflowRuns.find((r) => r.status === "running")!.id} contactId={c.id} />
+              )}
+            </div>
+            {data.jobs.length === 0 ? (
+              <p className="mt-4 text-[13px] text-muted">No follow-up jobs for this lead.</p>
+            ) : (
+              <ol className="mt-4 space-y-3 border-l border-line pl-4">
+                {data.jobs.map((j) => (
+                  <li key={j.id} className="text-[13px]">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{j.type.replace(/^workflow\./, "").replace(/_/g, " ")}</span>
+                      <StatusBadge status={j.status} />
+                      <span className="text-muted">{formatDateTime(j.runAt, tz)}</span>
+                    </div>
+                    {j.lastError && <p className="mt-0.5 text-bad">{j.lastError}</p>}
+                    {j.attemptHistory.length > 0 && (
+                      <details className="mt-1">
+                        <summary className="cursor-pointer text-xs text-accent">Attempt history ({j.attemptHistory.length})</summary>
+                        <ul className="mt-1 space-y-1 text-xs text-muted">
+                          {j.attemptHistory.map((a) => (
+                            <li key={a.id}>#{a.attempt} {a.outcome} — {a.error ?? "ok"}, {formatDateTime(a.startedAt, tz)}</li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
                   </li>
                 ))}
               </ol>

@@ -383,3 +383,93 @@ Interview mein ye bata sakte hain: *"Tests ne ye bugs pakde, isliye main integra
 | Scoring/routing crash | `lead_intelligence.failed` audit | Contact safe; "Route now" se dobara |
 | Do routers ek saath | Row locks | Ek jeetta hai, doosra skip / next rep |
 | Galat rule | Zod validation | Save hi nahi hota, saare errors ek saath |
+
+---
+
+# Phase 4 — Automation Engine (Hinglish)
+
+## 1. Humne kya banaya — ek line mein
+
+Ek **job queue** (Postgres table) aur ek **separate worker process** jo har naye lead ko 3 follow-up emails bhejta hai (30s, phir 1 din, phir 3 din baad) — jab tak lead reply na kare, appointment book na ho, deal won/lost na ho, ya lead opt-out na kare. Har message **[SIMULATED]** hai — kahin bhi asli email nahi jaata.
+
+## 2. Queue kaise kaam karta hai — "kaun sa job pehle?"
+
+File: `src/server/queue/queue.ts`
+
+```
+enqueueJob(idempotencyKey, runAt, ...)
+  → UNIQUE index pe ON CONFLICT DO NOTHING → same key dobara bhejo to naya row nahi banega
+
+claimDueJobs(workerId, limit, now)
+  → ek hi UPDATE statement: "SELECT ... FOR UPDATE SKIP LOCKED" ke andar
+  → do workers same job kabhi claim nahi kar sakte (locked row = skip, agla job uthao)
+  → status pending/retry_scheduled → processing, lease 60s ke liye
+
+completeJob() / failJob()
+  → sirf tabhi update karta hai jab (lockedBy = mera workerId AND status = processing)
+  → agar lease kisi aur ne le li (crash recovery ke baad), to update 0 rows return karta hai
+    → purana worker apna result overwrite NAHI kar sakta ("stale worker" protection)
+
+recoverAbandonedJobs()
+  → jo job "processing" mein atka hai aur lease_expires_at nikal gaya (worker crash/hang)
+  → use wapas retry_scheduled (ya attempts khatam ho gaye to failed) mein daal deta hai
+```
+
+## 3. Retry kaise kaam karta hai — transient vs permanent
+
+File: `src/lib/job-errors.ts`, `src/lib/backoff.ts`
+
+- **Transient** (503, timeout, network) → retry hoga, exponential backoff + jitter ke saath
+  (`base × 2^(attempt−1)`, jitter isliye taaki 100 jobs ek saath fail ho to sab ek hi second pe retry na karein).
+- **Permanent** (400 invalid email, koi handler nahi) → retry ka koi fayda nahi, seedha `failed`.
+- Attempts khatam ho jaayein (default 5) → chahe transient ho, phir bhi `failed` — "Gave up after 5 of 5 attempts".
+
+## 4. Workflow (follow-up sequence) kaise chalta hai
+
+File: `src/server/workflows/nurture.ts`
+
+```
+Lead create hota hai
+  → startNurtureWorkflow() → 1 workflow_run + 1 job (followup_1, delay = FOLLOWUP_1_DELAY_SECONDS)
+  → worker job claim karta hai
+  → SEND SE PEHLE: latest state DB se padho (reply aaya? appointment book hua? deal band hua? opt-out?)
+      → koi bhi stop condition true → job "skipped" + run "stopped" (reason ke saath), aage kuch nahi hota
+      → sab clear → message bhejo (idempotency key se — dobara bhejo to purana message dikh jaata hai, naya nahi jaata)
+      → agla step schedule karo (followup_2 → +1 din, followup_3 → +3 din)
+      → last step ke baad → run "completed"
+```
+
+**Idempotency ka matlab yahan:** agar worker crash ho jaaye message bhejne ke *baad* lekin job complete mark karne se *pehle*, to retry pe wahi handler dobara chalega — lekin `messages` table check karega "idempotency_key already sent hai?" → agar haan, dobara nahi bhejega. Isse ek hi step ka message kabhi 2 baar nahi jaata, chahe kitni baar retry ho.
+
+## 5. Concurrency — do cheezein jo test hui
+
+- **Ek hi lead event 5 baar concurrently aaye** (webhook retry jaisa) → `webhook_events` table ka UNIQUE(source, event_id) sirf ek ko "claim" karne deta hai, baaki 4 ko "duplicate_event" mil jaata hai turant, bina kuch dobara process kiye.
+- **4 workers ek saath poll karein** → `SKIP LOCKED` ki wajah se har job sirf **ek** worker ko milta hai. Test: 6 jobs, 4 workers, koi bhi job 2 baar claim nahi hua.
+
+## 6. Important files (Phase 4)
+
+| File | Kaam |
+|---|---|
+| `src/server/queue/queue.ts` | Enqueue, claim (SKIP LOCKED), complete/fail, backoff, crash recovery, Retry Now, Cancel |
+| `src/server/worker/runner.ts` | Handler registry, ek job process karna, poll loop (graceful shutdown `AbortSignal` se) |
+| `src/server/workflows/nurture.ts` | Follow-up sequence, stop rules, opt-out, cancel |
+| `src/lib/backoff.ts`, `job-errors.ts`, `followup-rules.ts` | Pure logic (18 unit tests, DB ki zaroorat nahi) |
+| `src/server/integrations/messaging/mock-provider.ts` | SIMULATED sender, demo failure switch (off/transient/permanent) |
+| `src/app/(app)/automations/page.tsx`, `failed-automations/page.tsx` | UI: worker status, job table, Retry/Cancel buttons |
+| `scripts/worker.ts` | `npm run worker` (hamesha chalta rehta hai) aur `npm run worker:once` (ek baar chalke exit) |
+| `scripts/demo-a.ts`, `demo-b.ts`, `demo-c.ts` | Teen repeatable demo scenarios |
+| `tests/automation.integration.test.ts` | 26 real-Postgres tests |
+
+## 7. Kya fail ho sakta hai
+
+| Failure | Kaise pata chalta hai | Recovery |
+|---|---|---|
+| Messaging provider down (simulated) | Job `retry_scheduled`, error + next retry time `/failed-automations` pe | Automatic retry, ya person "Retry Now" dabaye |
+| Worker crash beech mein | Lease expire ho jaata hai (60s) | Agla `recoverAbandonedJobs()` call use wapas queue mein daal deta hai |
+| 5 attempts khatam | Job `failed` | Sirf tabhi retry hoga jab koi manually "Retry Now" dabaye |
+| Do workers ek job try karein | `SKIP LOCKED` | Ek claim karta hai, doosra agla job uthata hai |
+| Worker purana result bhejne ki koshish kare (stale lease) | `lockedBy`/`status` check `completeJob` mein | Update 0 rows — result discard, kuch overwrite nahi hota |
+
+## 8. Interview mein kya bolein
+
+*"Job queue Postgres mein hai, memory mein nahi — kyunki web app aur worker do alag processes hain (Vercel pe web app serverless hai, jo hamesha chalta process nahi rakh sakta). Dono ek hi database dekhte hain. Main real do-process test kar chuka hoon: production web server ek terminal mein, worker bilkul alag terminal mein — lead web se banaya, alag worker process ne use pick karke complete kiya, aur dashboard (jo web process serve karta hai) ne wo result dikhaya. Isse pata chalta hai ki architecture sach mein distributed hai, sirf code mein nahi."*

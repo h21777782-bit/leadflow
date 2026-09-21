@@ -5,21 +5,109 @@ Newest phase at the top.
 
 ---
 
-## Phase 4 — Automation engine 🟡 IN PROGRESS (handed off)
+## Phase 4 — Automation engine ✅
 
-**Status:** core engine built and verified; UI, integration tests, demo scripts and Phase 4 docs are
-**not done**. See `HANDOFF.md` for the exact state and `NEXT_PROMPTS.md` (Prompt 1) to finish it.
+**Status:** complete. Core engine (queue, worker, workflow) was built and verified in an earlier
+session (see `HANDOFF.md` for that snapshot); this pass finished everything `HANDOFF.md` listed as
+not done: 26 real-Postgres integration tests, the Automations/Failed Automations/lead-page UI, three
+repeatable demo scripts, a real two-process (web + worker) test, and this round of docs.
 
-**Actually run at handoff:** `npm run verify` → typecheck ✓, lint ✓, 132 tests ✓ (18 new unit tests
-for backoff, error classification, follow-up stop rules), build ✓. Migration 0002 tested on a copy of
-real data. Worker smoke test: success, simulated transient failure → retry_scheduled → Retry Now →
-completed, exactly one message per step.
+**Actually run this session:** `npm run verify` → typecheck ✓, lint 0 warnings ✓, **158 tests passed
+(12 files)** (132 carried over + 26 new automation-engine integration tests), production build ✓
+(every data route still `ƒ (Dynamic)`). `npm run demo:a`, `npm run demo:b`, `npm run demo:c` all run
+to completion against the dev database with their asserted outcomes (see `DEMO_COMMANDS.md`).
 
-**Decision worth knowing:** drizzle-kit generated a drop-and-recreate of the `job_status` enum, which
-would have failed on existing rows. The migration was hand-edited to `ALTER TYPE … RENAME VALUE`.
+### What was added
 
-**Also changed:** `next.config.ts` allows server actions from `*.app.github.dev` so the app works in
-GitHub Codespaces (untested there).
+| File | What it does |
+|---|---|
+| `tests/automation.integration.test.ts` | 26 tests against real Postgres: workflow start timing, duplicate/concurrent lead events, concurrent job claiming (no double-claim), the full 1→2→3 follow-up chain with real delays, all 6 stop reasons (reply, appointment, won, lost, opt-out, manual cancel), transient/permanent failure handling, 5-attempt exhaustion, Retry Now, per-step message idempotency (handler called twice → 1 message), lease-expiry recovery, stale-worker lease-loss protection, `enqueueJob` idempotency, one-run-per-contact, and graceful worker shutdown on an abort signal. |
+| `src/app/actions/automations.ts` | Server actions: Retry Now, Cancel job, Cancel workflow, opt-out toggle, the demo failure switch (refuses outside `MOCK_MODE`), and step-delay edits. |
+| `src/components/automations/controls.tsx` | Client components for all of the above (`useTransition`, matches the existing `RouteNowButton`/`StageControl` pattern). |
+| `src/app/(app)/automations/page.tsx` (rewritten) | Worker status (online/offline from heartbeats), job counts by status, the demo failure switch, editable step delays, workflow runs with Cancel, a jobs table with expandable attempt history and Retry/Cancel, and outgoing messages clearly labelled `SIMULATED`. |
+| `src/app/(app)/failed-automations/page.tsx` | Retry Now button per row; explains *why* a job can't be retried when no worker handler exists for its type (`SUPPORTED_JOB_TYPES`). |
+| `src/app/(app)/contacts/[id]/page.tsx` | New "Follow-up automation" panel: opt-out toggle, Cancel workflow (if running), and a job/attempt-history timeline (reuses `getContactDetail`'s existing `jobs` field — no new query needed). |
+| `src/server/queries/index.ts` (`getAutomationOverview`) | Now also computes each worker's `online` boolean server-side (heartbeat age vs. `WORKER_POLL_MS`), so the page component stays a pure render (see bug #1 below). |
+| `scripts/demo-a.ts` / `demo-b.ts` / `demo-c.ts` | Success path, failure→retry→recovery, and reply-cancels-workflow — same pattern as `demo-routing.ts` (fictional `.example` leads, safe to re-run). Each resets only its **own** previous lead (matched by email prefix), not the whole `demo-automation` tag, so `a`/`b`/`c` can be run in any order without deleting each other's data. |
+
+### Errors encountered and fixes (this session)
+
+1. **`react-hooks/purity` ESLint error on the rewritten Automations page**: `Date.now()` called during
+   render to compute each worker's online/offline status. This is the exact same class of bug already
+   documented in Phase 1/2 (a raw `Date` during render breaks React's purity rule). Fixed the same way:
+   moved the "now vs. last heartbeat" comparison into `getAutomationOverview()` in the query layer
+   (which takes `now = new Date()` as a parameter, defaulting once per call, not per render), and the
+   component just reads `worker.online`.
+2. **`.env.local` created from `.env.example` pointed at the Supabase CLI's default port (54322) and
+   database name (`postgres`)**, but `docker-compose.yml` (the option actually available — no internet
+   access to install the Supabase CLI) provisions plain Postgres on **5432** as database `leadflow`
+   (+ `leadflow_test`). Fixed by pointing `DATABASE_URL`/`TEST_DATABASE_URL` at the compose ports; this
+   mismatch is worth calling out explicitly in `README.md`'s quick start (already has both examples,
+   commented).
+3. **A stale `leadflow-db-1` Docker container from an earlier, unrelated session already existed** with
+   a Postgres volume attached. `docker compose up -d` recreated it cleanly (`Recreate` → `Started`) —
+   no data-loss risk since it's a disposable local dev volume, but worth noting for anyone who sees an
+   unexpected "Recreate" in the compose output.
+
+### Real two-process test (item 6 of the finishing prompt) — actually run
+
+Built the production bundle (`npm run build`), then started **two separate OS processes** on this
+machine: `npm run start -p 3100` (the web server) and `npm run worker` (the worker) in parallel, each
+with its own PID.
+
+1. Fetched `/contacts/new` from the running web server and read the real hidden `$ACTION_*` fields
+   Next.js embeds for progressive enhancement (no JavaScript), then POSTed a real
+   `multipart/form-data` request with `curl` — a genuine HTTP request through the actual web process,
+   not a direct service-layer call. Response: `303 See Other` → `/contacts/<id>?created=1`.
+2. Polled the **separate worker process's** log (not the web server's) until it printed
+   `✔ workflow.send_followup … attempt 1: completed` — it claimed and ran the job the web process had
+   only written to Postgres, ~30 s later (the configured `FOLLOWUP_1_DELAY_SECONDS`).
+3. Fetched the lead's page and `/automations` from the (still running) web server: both showed the
+   completed job, the `SIMULATED` message, and the worker's own heartbeat id
+   (`LAPTOP-…-17188-…`) — proving the dashboard the web process serves reflects work done entirely by
+   the other process, through Postgres only.
+4. Sent `SIGTERM` to the worker's `node` process directly (not through the `npm run worker` wrapper —
+   see caveat below), then stopped the web server. Both processes exited; the port stopped responding.
+
+**Caveat, stated honestly:** sending `SIGTERM` straight to the OS process confirmed the processes are
+genuinely independent, but it went through `npm`'s wrapper script rather than reaching the Node
+process's `process.on("SIGTERM", …)` handler cleanly (the log showed `Terminated` from npm, not the
+app's own "finishing current batch, then exiting" message) — a shell/tooling artifact of how `npm run`
+spawns a child, not a code bug. The graceful-shutdown *logic itself* (`runWorker` finishes its current
+batch and writes a `stopped` heartbeat when its `AbortSignal` fires) is verified deterministically by
+the `"the long-running worker shuts down cleanly on SIGINT/SIGTERM"` integration test, which calls
+`runWorker` directly with a real `AbortController` and asserts the heartbeat ends up `stopped`.
+
+### Deployment notes (worker cannot run on Vercel)
+
+- **Vercel** hosts the Next.js web app only. Every Vercel deployment is a **serverless function per
+  request**: it starts, handles the request, and can be frozen or killed as soon as the response is
+  sent — there is no guarantee of a long-lived process between requests. The worker's job (`runWorker`)
+  is an infinite `while` loop that polls Postgres every `WORKER_POLL_MS`; a serverless function cannot
+  keep that loop alive, so jobs would never be claimed if the worker ran there.
+- **Railway** (or Render/Fly) runs the worker as a normal **always-on process** (`npm run worker`),
+  exactly like it runs locally in this session's test above. It receives `SIGTERM` on deploy/restart,
+  which `scripts/worker.ts` already handles by finishing the current batch before exiting.
+- **Supabase** (or any managed Postgres) is the shared database both the web app and the worker connect
+  to — this is *why* the job queue lives in Postgres rather than in memory: two separate processes need
+  a shared source of truth. On Supabase specifically, the **transaction pooler (port 6543)** does not
+  support prepared statements, so `DATABASE_PREPARE=false` is required there (already a documented env
+  var — see `.env.example`); the **session pooler / direct connection (port 5432)** works with the
+  default `DATABASE_PREPARE=true`. Full step-by-step deployment instructions are Phase 9's job
+  (`DEPLOYMENT.md`) — nothing was deployed in this session.
+
+### Not verified this session (stated honestly)
+
+- No real browser was used (none available in this environment); pages were checked by HTTP status
+  code (200, no error payload) and by grepping the rendered HTML for expected content, the same method
+  used in earlier phases.
+- The demo failure switch's `permanent` mode and the 5-attempts-exhausted path are covered by the
+  integration tests and — for the permanent path — implicitly by demo:b's transient case, but there is
+  no `demo:d` walking the 5-attempts-exhausted scenario end to end (it's covered by a test, not a
+  narrated demo script; the finishing prompt only asked for three scripts, A/B/C).
+- HighLevel sync jobs (`highlevel.sync_contact` etc.) referenced in the "no worker handler" test don't
+  exist as real seeded data — the test inserts one directly to prove `retryJobNow`'s refusal message;
+  Phase 5 will add the real handler.
 
 ---
 

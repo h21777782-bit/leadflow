@@ -30,7 +30,7 @@ npm run verify
 ```
 
 Shows, in order: route types generated, `tsc` clean, ESLint 0 warnings,
-**31 tests passed**, production build with every data page marked `ƒ (Dynamic)`.
+**158 tests passed**, production build with every data page marked `ƒ (Dynamic)`.
 
 ## 2. Run the app
 
@@ -206,7 +206,63 @@ select outcome, rule_name, trigger, reason from routing_decisions order by creat
 select event_type, message from audit_logs where event_type in ('lead.scored','owner.assigned','owner.reassigned','lead.unassigned') order by created_at desc limit 10;
 ```
 
-## 10. Reset before an interview
+## 10. Phase 4 — automation engine (job queue, worker, follow-ups)
+
+> Every send here is `[SIMULATED]` — the mock messaging provider never contacts anyone real.
+
+### 10a. Start the worker (separate terminal, keep it running)
+
+```bash
+npm run dev          # terminal 1 — the web app
+npm run worker        # terminal 2 — the worker (polls Postgres every 2s by default)
+```
+
+A new lead's first follow-up is scheduled `FOLLOWUP_1_DELAY_SECONDS` (default **30s**) after creation —
+wait ~30s after creating a lead and watch terminal 2 print `✔ workflow.send_followup … completed`.
+
+### 10b. One-command terminal demos (no waiting — force the job due immediately)
+
+```bash
+npm run demo:a         # success: score + owner → follow-up scheduled → worker → SIMULATED send
+npm run demo:b         # failure: switch → transient → job fails+retries → switch off → Retry Now → success
+npm run demo:c         # cancellation: lead replies → worker → follow-up skipped, workflow stopped
+```
+
+Each prints the exact before/after state and throws if the outcome isn't what it asserts. They only
+touch their own fictional lead (`demo-a-*@automation.example` etc., tag `demo-automation`) and can be
+run in any order, any number of times.
+
+### 10c. In the browser
+
+| Page | What to point out |
+|---|---|
+| `/automations` | Worker online/offline (from heartbeats), job counts by status, the **demo failure switch** (mock mode only — flip it to `transient` before creating a lead to show a live failure), editable follow-up delays, workflow runs with **Cancel**, the jobs table with **Retry Now** / **Cancel** and expandable attempt history, and every outgoing message labelled `SIMULATED`. |
+| `/failed-automations` | **Retry Now** per row; a job with no worker handler explains why retrying can't succeed instead of silently failing again. |
+| A lead's page (e.g. after `npm run demo:a`) | New "Follow-up automation" panel: opt-out toggle, Cancel workflow, and the job/attempt-history timeline. |
+
+### 10d. Prove it with tests
+
+```bash
+npx vitest run tests/automation.integration.test.ts   # 26 tests, real Postgres
+```
+
+Point at: *concurrent claiming by several workers never claims the same job twice*, *fails after
+exactly 5 attempts, with 5 attempt rows*, *a stale worker cannot overwrite the result once its lease
+has been recovered*, and *idempotency: calling the handler twice … sends exactly one message*.
+
+### 10e. Two real, separate processes (what makes this "not a monolith")
+
+```bash
+npm run build && npm run start   # terminal 1 — production web server
+npm run worker                    # terminal 2 — completely separate OS process
+```
+
+Create a lead in the browser, then watch **terminal 2** (not terminal 1) log the completed job ~30s
+later. The web process only ever writes to Postgres; it never runs the job itself. This is exactly why
+the worker must be deployed as its own always-on service (Railway/Render/Fly), never inside a Vercel
+serverless function — see `IMPLEMENTATION_LOG.md`, Phase 4, "Deployment notes".
+
+## 11. Reset before an interview
 
 ```bash
 npm run db:seed        # restores the exact demo dataset
