@@ -11,13 +11,14 @@ import { fullName, normalizeEmail, normalizePhone } from "@/lib/normalize";
 import { zonedDateParts, zonedTimeToUtc } from "@/lib/timezone";
 import { processLeadChange } from "@/server/services/lead-intelligence";
 import { SYSTEM_ACTOR } from "@/server/services/types";
+import { ensureDefaultSteps } from "@/server/workflows/nurture";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const SEED_META = { seed: true } as const;
 
 const TABLES = [
-  "audit_logs", "routing_decisions", "integration_calls", "messages", "jobs", "workflow_runs", "lead_scores",
+  "audit_logs", "routing_decisions", "job_attempts", "worker_heartbeats", "app_settings", "workflow_steps", "integration_calls", "messages", "jobs", "workflow_runs", "lead_scores",
   "onboarding_tasks", "payments", "appointments", "stage_history", "opportunities",
   "contacts", "routing_rules", "pipeline_stages", "users", "webhook_events",
 ];
@@ -26,6 +27,7 @@ export type SeedSummary = Record<string, number>;
 
 export async function seedDatabase(db: Database, now = new Date()): Promise<SeedSummary> {
   const summary = await insertDemoData(db, now);
+  await ensureDefaultSteps(db); // follow-up sequence config (Phase 4)
 
   // Phase 3: score every lead and route the unowned ones with the REAL engine
   // (same code path as the app). Runs after the data transaction has committed.
@@ -267,6 +269,7 @@ async function insertDemoData(db: Database, now: Date): Promise<SeedSummary> {
           runAt: new Date(now.getTime() + ((i % 4) + 1) * 6 * HOUR),
           workflowRunId: run.id,
           contactId: contact.id,
+          opportunityId: opp.id,
           createdAt,
         });
         counts.jobs++;
@@ -302,9 +305,12 @@ async function insertDemoData(db: Database, now: Date): Promise<SeedSummary> {
           payload: { contactId: c.id, ...SEED_META },
           status: f.status,
           idempotencyKey: `seed:${f.jobType}:${c.id}`,
-          runAt: f.status === "retrying" ? new Date(now.getTime() + 4 * 60_000) : firstAttempt,
+          runAt: firstAttempt,
           attempts: f.attempts,
           lastError: f.error,
+          errorKind: f.statusCode && (f.statusCode >= 500 || f.statusCode === 429) ? "transient" : "permanent",
+          statusReason: "[demo seed] Historical failure record",
+          completedAt: new Date(firstAttempt.getTime() + 2 ** f.attempts * 60_000),
           contactId: c.id,
           createdAt: firstAttempt,
           updatedAt: new Date(firstAttempt.getTime() + f.attempts * 60_000),
@@ -316,6 +322,7 @@ async function insertDemoData(db: Database, now: Date): Promise<SeedSummary> {
         const at = new Date(firstAttempt.getTime() + (2 ** (a - 1) - 1) * 60_000);
         await tx.insert(s.integrationCalls).values({ provider: f.provider, operation: f.operation, statusCode: f.statusCode, success: false, durationMs: 180 + a * 37, attempt: a, error: f.error, jobId: job.id, createdAt: at });
         counts.integration_calls++;
+        await tx.insert(s.jobAttempts).values({ jobId: job.id, attempt: a, workerId: "demo-seed", outcome: f.statusCode === 400 ? "permanent_error" : "transient_error", error: f.error, durationMs: 180 + a * 37, startedAt: at, finishedAt: at });
       }
       if (f.jobType === "message.send_sms") {
         const lead = SEED_LEADS.find((l) => l.email === f.leadEmail)!;
@@ -323,7 +330,7 @@ async function insertDemoData(db: Database, now: Date): Promise<SeedSummary> {
         counts.messages++;
       }
       audit.push({ eventType: "integration.failed", entityType: "job", entityId: job.id, contactId: c.id, actorType: "integration", actorId: f.provider, message: f.error, metadata: { ...SEED_META, operation: f.operation, statusCode: f.statusCode }, createdAt: firstAttempt });
-      if (f.status === "dead") {
+      if (f.status === "failed") {
         audit.push({ eventType: "job.dead_lettered", entityType: "job", entityId: job.id, contactId: c.id, actorType: "worker", message: `Moved to failed automations after ${f.attempts} attempts`, metadata: SEED_META, createdAt: new Date(firstAttempt.getTime() + (2 ** (f.attempts - 1)) * 60_000) });
       }
     }

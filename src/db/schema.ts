@@ -37,8 +37,9 @@ export const leadBandEnum = pgEnum("lead_band", ["hot", "warm", "cold"]);
 export const routingStrategyEnum = pgEnum("routing_strategy", ["assign_user", "round_robin", "least_loaded"]);
 export const messageDirectionEnum = pgEnum("message_direction", ["outbound", "inbound"]);
 export const routingOutcomeEnum = pgEnum("routing_outcome", ["assigned", "reassigned", "unassigned"]);
-export const workflowRunStatusEnum = pgEnum("workflow_run_status", ["running", "completed", "stopped", "failed"]);
-export const jobStatusEnum = pgEnum("job_status", ["pending", "running", "succeeded", "retrying", "dead", "cancelled"]);
+export const workflowRunStatusEnum = pgEnum("workflow_run_status", ["running", "completed", "stopped", "failed", "cancelled"]);
+export const jobStatusEnum = pgEnum("job_status", ["pending", "processing", "retry_scheduled", "completed", "failed", "cancelled", "skipped"]);
+export const attemptOutcomeEnum = pgEnum("attempt_outcome", ["completed", "skipped", "transient_error", "permanent_error", "abandoned"]);
 export const messageChannelEnum = pgEnum("message_channel", ["email", "sms"]);
 export const messageStatusEnum = pgEnum("message_status", ["queued", "sent", "failed", "skipped"]);
 export const appointmentStatusEnum = pgEnum("appointment_status", ["scheduled", "confirmed", "cancelled", "completed", "no_show"]);
@@ -98,6 +99,7 @@ export const contacts = pgTable(
     notes: text("notes"),
     lastContactedAt: timestamp("last_contacted_at", { withTimezone: true }),
     nextFollowUpAt: timestamp("next_follow_up_at", { withTimezone: true }),
+    optedOutAt: timestamp("opted_out_at", { withTimezone: true }), // unsubscribed: never message again
     ghlContactId: text("ghl_contact_id"),
     // Current score (denormalized for fast lists/dashboards; history in lead_scores)
     leadScore: integer("lead_score"),
@@ -255,7 +257,11 @@ export const jobs = pgTable(
     maxAttempts: integer("max_attempts").notNull().default(5),
     lastError: text("last_error"),
     lockedAt: timestamp("locked_at", { withTimezone: true }),
-    lockedBy: text("locked_by"),
+    lockedBy: text("locked_by"), // worker id holding the lease
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }), // past this = abandoned, recoverable
+    errorKind: text("error_kind"), // transient | permanent
+    statusReason: text("status_reason"), // why skipped / cancelled / failed
+    opportunityId: uuid("opportunity_id").references(() => opportunities.id, { onDelete: "set null" }),
     workflowRunId: uuid("workflow_run_id").references(() => workflowRuns.id, { onDelete: "set null" }),
     contactId: uuid("contact_id").references(() => contacts.id, { onDelete: "cascade" }),
     createdAt: createdAt(),
@@ -265,6 +271,8 @@ export const jobs = pgTable(
   (t) => [
     uniqueIndex("jobs_idempotency_key_uq").on(t.idempotencyKey),
     index("jobs_due_idx").on(t.status, t.runAt),
+    index("jobs_lease_idx").on(t.status, t.leaseExpiresAt),
+    index("jobs_run_idx").on(t.workflowRunId),
     index("jobs_contact_idx").on(t.contactId),
   ],
 );
@@ -281,6 +289,8 @@ export const messages = pgTable(
     toAddress: text("to_address").notNull(),
     body: text("body").notNull(),
     status: messageStatusEnum("status").notNull().default("queued"),
+    provider: text("provider").notNull().default("mock"), // "mock" = simulated, nothing leaves the system
+    subject: text("subject"),
     idempotencyKey: text("idempotency_key").notNull(),
     providerMessageId: text("provider_message_id"),
     error: text("error"),
@@ -293,6 +303,59 @@ export const messages = pgTable(
     index("messages_contact_idx").on(t.contactId),
   ],
 );
+
+// One row per execution attempt of a job — the full retry history.
+export const jobAttempts = pgTable(
+  "job_attempts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    jobId: uuid("job_id").notNull().references(() => jobs.id, { onDelete: "cascade" }),
+    attempt: integer("attempt").notNull(),
+    workerId: text("worker_id"),
+    outcome: attemptOutcomeEnum("outcome").notNull(),
+    error: text("error"),
+    durationMs: integer("duration_ms"),
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }), // when the retry was scheduled for
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("job_attempts_job_idx").on(t.jobId, t.attempt)],
+);
+
+// Follow-up sequence configuration (editable; read by the worker at run time).
+export const workflowSteps = pgTable(
+  "workflow_steps",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workflowKey: text("workflow_key").notNull(),
+    stepKey: text("step_key").notNull(),
+    position: integer("position").notNull(),
+    delaySeconds: integer("delay_seconds").notNull(), // after workflow start (step 1) or after the previous step
+    channel: messageChannelEnum("channel").notNull().default("email"),
+    subject: text("subject").notNull(),
+    bodyTemplate: text("body_template").notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+  },
+  (t) => [uniqueIndex("workflow_steps_key_uq").on(t.workflowKey, t.stepKey)],
+);
+
+// Small key/value store for runtime switches that BOTH the web app and the worker must see
+// (e.g. the demo-only mock failure switch). Env vars can't do that across processes.
+export const appSettings = pgTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").$type<unknown>().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const workerHeartbeats = pgTable("worker_heartbeats", {
+  workerId: text("worker_id").primaryKey(),
+  hostname: text("hostname"),
+  status: text("status").notNull(), // running | stopping | stopped
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  jobsCompleted: integer("jobs_completed").notNull().default(0),
+  jobsFailed: integer("jobs_failed").notNull().default(0),
+});
 
 // ── Appointments ─────────────────────────────────────────────────────────────
 export const appointments = pgTable(
@@ -325,6 +388,7 @@ export const webhookEvents = pgTable(
     source: text("source").notNull(), // website | n8n | highlevel | payments
     eventType: text("event_type").notNull(),
     externalEventId: text("external_event_id").notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>(), // what processing produced (replayed on duplicates)
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
     signatureValid: boolean("signature_valid"),
     status: webhookStatusEnum("status").notNull().default("received"),

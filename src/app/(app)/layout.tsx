@@ -10,7 +10,7 @@ async function loadShellState(): Promise<{ mode: "mock" | "live"; failedCount: n
   let mode: "mock" | "live" = "mock";
   try {
     mode = getEnv().MOCK_MODE ? "mock" : "live";
-    const [row] = await getDb().select({ n: count() }).from(jobs).where(eq(jobs.status, "dead"));
+    const [row] = await getDb().select({ n: count() }).from(jobs).where(eq(jobs.status, "failed"));
     return { mode, failedCount: row?.n ?? 0 };
   } catch {
     return { mode, failedCount: 0 };

@@ -17,7 +17,7 @@ export default async function DashboardPage() {
   const tz = getEnv().APP_TIMEZONE;
   const d = await getDashboardSummary();
   const openCount = OPEN_STAGES.reduce((n, s) => n + d.byStage[s].count, 0);
-  const automationTotal = d.automation.succeeded + d.automation.pending + d.automation.retrying + d.automation.dead;
+  const automationTotal = d.automation.completed + d.automation.pending + d.automation.retrying + d.automation.failed;
 
   const kpis = [
     { label: "New leads, last 7 days", value: d.newLeads.toString(), note: `${d.totalLeads} leads in total` },
@@ -194,10 +194,10 @@ export default async function DashboardPage() {
           <Panel title="Automation health" className="xl:col-span-2">
             <dl className="space-y-3">
               {[
-                { label: "Succeeded", value: d.automation.succeeded, tone: "bg-ok" },
+                { label: "Completed or skipped", value: d.automation.completed, tone: "bg-ok" },
                 { label: "Scheduled or running", value: d.automation.pending, tone: "bg-accent" },
                 { label: "Retrying", value: d.automation.retrying, tone: "bg-warm" },
-                { label: "Failed — needs action", value: d.automation.dead, tone: "bg-bad" },
+                { label: "Failed — needs action", value: d.automation.failed, tone: "bg-bad" },
               ].map((row) => (
                 <div key={row.label}>
                   <div className="flex justify-between text-[13px]">
@@ -210,7 +210,7 @@ export default async function DashboardPage() {
                 </div>
               ))}
             </dl>
-            {d.automation.dead > 0 && (
+            {d.automation.failed > 0 && (
               <Link href="/failed-automations" className="mt-4 inline-block text-[13px] font-medium text-accent hover:underline">
                 Review failed automations
               </Link>

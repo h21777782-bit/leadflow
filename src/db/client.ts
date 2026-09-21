@@ -21,6 +21,7 @@ export function getDb(): Database {
       max: 10,
       connect_timeout: 5, // seconds — fail fast so the UI can show a DB error state
       idle_timeout: 20,
+      prepare: env.DATABASE_PREPARE,
       onnotice: () => {},
     });
     globalForDb.__leadflowSql = client;

@@ -20,6 +20,7 @@ import { SERVICE_LABEL, type Service } from "@/lib/pipeline";
 import { validateContact, type FieldErrors, type ValidContact } from "@/lib/validation/contact";
 import { writeAudit } from "./audit";
 import { processLeadChange, type LeadChangeOutcome } from "./lead-intelligence";
+import { startNurtureWorkflow, type StartResult } from "@/server/workflows/nurture";
 import type { Actor, DbOrTx } from "./types";
 
 type ContactRow = typeof contacts.$inferSelect;
@@ -36,7 +37,7 @@ export type DuplicateMatch = {
 export type CreateContactResult =
   | { status: "invalid"; errors: FieldErrors }
   | { status: "duplicate"; matches: DuplicateMatch[]; raceDetected?: boolean }
-  | { status: "created"; contactId: string; opportunityId: string | null; intelligence: LeadChangeOutcome };
+  | { status: "created"; contactId: string; opportunityId: string | null; intelligence: LeadChangeOutcome; workflow: StartResult | null };
 
 export type UpdateContactResult =
   | { status: "invalid"; errors: FieldErrors }
@@ -172,7 +173,17 @@ export async function createContact(
   }
   // Committed. Now score + route (separate transactions; failure is audited, never undoes the create).
   const intelligence = await processLeadChange(db, actor, created.contactId, "contact.created");
-  return { status: "created", ...created, intelligence };
+  // Phase 4: start the nurture workflow (idempotent). Scoring/routing above is NOT repeated.
+  let workflow: StartResult | null = null;
+  if (created.opportunityId) {
+    try {
+      workflow = await startNurtureWorkflow(db, actor, created.contactId, "contact.created");
+    } catch (err) {
+      workflow = { status: "skipped", reason: `Could not start workflow: ${err instanceof Error ? err.message : String(err)}` };
+      await writeAudit(db, actor, { eventType: "workflow.start_failed", entityType: "contact", entityId: created.contactId, contactId: created.contactId, message: workflow.reason });
+    }
+  }
+  return { status: "created", ...created, intelligence, workflow };
 }
 
 // ── Opportunity insert (shared with opportunities service) ──────────────────

@@ -38,6 +38,17 @@ const envSchema = z
     HIGHLEVEL_CALENDAR_ID: z.string().optional(),
     HIGHLEVEL_WEBHOOK_PUBLIC_KEY: z.string().optional(),
 
+    // ── Automation engine (Phase 4) ──
+    FOLLOWUP_1_DELAY_SECONDS: z.coerce.number().int().min(0).max(86_400).default(30), // short for demos
+    JOB_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
+    RETRY_BASE_DELAY_SECONDS: z.coerce.number().int().min(1).max(3600).default(15),
+    RETRY_MAX_DELAY_SECONDS: z.coerce.number().int().min(1).max(86_400).default(3600),
+    JOB_LEASE_SECONDS: z.coerce.number().int().min(5).max(3600).default(60),
+    WORKER_POLL_MS: z.coerce.number().int().min(200).max(60_000).default(2000),
+    WORKER_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(5),
+    // Supabase transaction pooler (port 6543) does not support prepared statements → set false there.
+    DATABASE_PREPARE: booleanFromString.default(true),
+
     // Shared secret used to sign webhooks from our own site / n8n (Phase 6).
     WEBHOOK_SIGNING_SECRET: z.string().optional(),
   })

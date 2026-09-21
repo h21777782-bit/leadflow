@@ -81,10 +81,10 @@ export async function getDashboardSummary(now = new Date()) {
     byStage,
     sources: sourceRows,
     automation: {
-      succeeded: jobs.succeeded ?? 0,
-      pending: (jobs.pending ?? 0) + (jobs.running ?? 0),
-      retrying: jobs.retrying ?? 0,
-      dead: jobs.dead ?? 0,
+      completed: (jobs.completed ?? 0) + (jobs.skipped ?? 0),
+      pending: (jobs.pending ?? 0) + (jobs.processing ?? 0),
+      retrying: jobs.retry_scheduled ?? 0,
+      failed: jobs.failed ?? 0,
     },
     recent,
     bands,
@@ -192,9 +192,10 @@ export async function getContactDetail(id: string) {
 
   const opps = await db.select().from(s.opportunities).where(eq(s.opportunities.contactId, id)).orderBy(desc(s.opportunities.createdAt));
   const oppIds = opps.map((o) => o.id);
-  const [scoreHistory, routing] = await Promise.all([
+  const [scoreHistory, routing, contactJobs] = await Promise.all([
     db.select().from(s.leadScores).where(eq(s.leadScores.contactId, id)).orderBy(desc(s.leadScores.computedAt)).limit(10),
     listRoutingDecisions({ contactId: id, limit: 20 }),
+    listJobs({ contactId: id, limit: 30 }),
   ]);
   const [history, appts, timeline, msgs, runs] = await Promise.all([
     oppIds.length
@@ -206,7 +207,7 @@ export async function getContactDetail(id: string) {
     db.select().from(s.workflowRuns).where(eq(s.workflowRuns.contactId, id)).orderBy(desc(s.workflowRuns.startedAt)),
   ]);
 
-  return { ...contact, opportunities: opps, history, appointments: appts, timeline, messages: msgs, workflowRuns: runs, scoreHistory, routing };
+  return { ...contact, opportunities: opps, history, appointments: appts, timeline, messages: msgs, workflowRuns: runs, scoreHistory, routing, jobs: contactJobs };
 }
 
 // ── Pipeline board ───────────────────────────────────────────────────────────
@@ -282,16 +283,18 @@ export async function listWorkflowRuns() {
       finishedAt: s.workflowRuns.finishedAt,
       contactId: s.contacts.id,
       contactName: sql<string>`trim(${s.contacts.firstName} || ' ' || coalesce(${s.contacts.lastName}, ''))`,
-      messagesSent: sql<number>`(select count(*)::int from messages m where m.workflow_run_id = ${s.workflowRuns.id} and m.status = 'sent')`,
+      messagesSent: sql<number>`(select count(*)::int from messages m where m.workflow_run_id = ${s.workflowRuns.id} and m.status = 'sent' and m.direction = 'outbound')`,
+      nextJobAt: sql<Date | null>`(select min(j.run_at) from jobs j where j.workflow_run_id = ${s.workflowRuns.id} and j.status in ('pending','retry_scheduled'))`,
     })
     .from(s.workflowRuns)
     .innerJoin(s.contacts, eq(s.contacts.id, s.workflowRuns.contactId))
     .orderBy(desc(s.workflowRuns.startedAt));
 }
 
-export async function listFailedJobs() {
-  const db = getDb();
-  return db
+export type JobStatus = (typeof s.jobStatusEnum.enumValues)[number];
+
+export async function listJobs({ statuses, limit = 100, contactId }: { statuses?: JobStatus[]; limit?: number; contactId?: string } = {}) {
+  const rows = await getDb()
     .select({
       id: s.jobs.id,
       type: s.jobs.type,
@@ -299,16 +302,72 @@ export async function listFailedJobs() {
       attempts: s.jobs.attempts,
       maxAttempts: s.jobs.maxAttempts,
       lastError: s.jobs.lastError,
+      errorKind: s.jobs.errorKind,
+      statusReason: s.jobs.statusReason,
       runAt: s.jobs.runAt,
+      lockedBy: s.jobs.lockedBy,
+      leaseExpiresAt: s.jobs.leaseExpiresAt,
       updatedAt: s.jobs.updatedAt,
       createdAt: s.jobs.createdAt,
+      completedAt: s.jobs.completedAt,
+      payload: s.jobs.payload,
+      workflowRunId: s.jobs.workflowRunId,
       contactId: s.contacts.id,
-      contactName: sql<string>`trim(${s.contacts.firstName} || ' ' || coalesce(${s.contacts.lastName}, ''))`,
+      contactName: sql<string | null>`trim(${s.contacts.firstName} || ' ' || coalesce(${s.contacts.lastName}, ''))`,
     })
     .from(s.jobs)
     .leftJoin(s.contacts, eq(s.contacts.id, s.jobs.contactId))
-    .where(inArray(s.jobs.status, ["dead", "retrying"]))
-    .orderBy(desc(s.jobs.updatedAt));
+    .where(and(statuses ? inArray(s.jobs.status, statuses) : undefined, contactId ? eq(s.jobs.contactId, contactId) : undefined))
+    .orderBy(desc(s.jobs.updatedAt))
+    .limit(limit);
+  const attempts = rows.length
+    ? await getDb().select().from(s.jobAttempts).where(inArray(s.jobAttempts.jobId, rows.map((r) => r.id))).orderBy(asc(s.jobAttempts.attempt))
+    : [];
+  return rows.map((r) => ({ ...r, attemptHistory: attempts.filter((a) => a.jobId === r.id) }));
+}
+
+export async function listFailedJobs() {
+  return listJobs({ statuses: ["failed", "retry_scheduled"] });
+}
+
+export async function getAutomationOverview() {
+  const db = getDb();
+  const [jobCounts, runCounts, workers, failureMode, steps, messagesOut] = await Promise.all([
+    db.select({ status: s.jobs.status, n: sql<number>`count(*)::int` }).from(s.jobs).groupBy(s.jobs.status),
+    db.select({ status: s.workflowRuns.status, n: sql<number>`count(*)::int` }).from(s.workflowRuns).groupBy(s.workflowRuns.status),
+    db.select().from(s.workerHeartbeats).orderBy(desc(s.workerHeartbeats.lastSeenAt)).limit(5),
+    db.select().from(s.appSettings).where(eq(s.appSettings.key, "demo.mock_messaging_failure_mode")),
+    db.select().from(s.workflowSteps).orderBy(asc(s.workflowSteps.workflowKey), asc(s.workflowSteps.position)),
+    db
+      .select({
+        id: s.messages.id,
+        contactId: s.messages.contactId,
+        contactName: sql<string>`trim(${s.contacts.firstName} || ' ' || coalesce(${s.contacts.lastName}, ''))`,
+        subject: s.messages.subject,
+        body: s.messages.body,
+        toAddress: s.messages.toAddress,
+        status: s.messages.status,
+        provider: s.messages.provider,
+        providerMessageId: s.messages.providerMessageId,
+        error: s.messages.error,
+        idempotencyKey: s.messages.idempotencyKey,
+        createdAt: s.messages.createdAt,
+        attemptedAt: s.messages.attemptedAt,
+      })
+      .from(s.messages)
+      .innerJoin(s.contacts, eq(s.contacts.id, s.messages.contactId))
+      .where(and(eq(s.messages.direction, "outbound"), sql`${s.messages.templateKey} like 'nurture.followup%'`, sql`${s.messages.idempotencyKey} not like 'seed:%'`))
+      .orderBy(desc(sql`coalesce(${s.messages.attemptedAt}, ${s.messages.createdAt})`))
+      .limit(20),
+  ]);
+  return {
+    jobs: Object.fromEntries(jobCounts.map((r) => [r.status, r.n])) as Partial<Record<JobStatus, number>>,
+    runs: Object.fromEntries(runCounts.map((r) => [r.status, r.n])) as Record<string, number>,
+    workers,
+    failureMode: (failureMode[0]?.value as string | undefined) ?? "off",
+    steps,
+    messages: messagesOut,
+  };
 }
 
 // ── Activity (audit log) ─────────────────────────────────────────────────────

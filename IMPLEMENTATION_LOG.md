@@ -5,6 +5,24 @@ Newest phase at the top.
 
 ---
 
+## Phase 4 — Automation engine 🟡 IN PROGRESS (handed off)
+
+**Status:** core engine built and verified; UI, integration tests, demo scripts and Phase 4 docs are
+**not done**. See `HANDOFF.md` for the exact state and `NEXT_PROMPTS.md` (Prompt 1) to finish it.
+
+**Actually run at handoff:** `npm run verify` → typecheck ✓, lint ✓, 132 tests ✓ (18 new unit tests
+for backoff, error classification, follow-up stop rules), build ✓. Migration 0002 tested on a copy of
+real data. Worker smoke test: success, simulated transient failure → retry_scheduled → Retry Now →
+completed, exactly one message per step.
+
+**Decision worth knowing:** drizzle-kit generated a drop-and-recreate of the `job_status` enum, which
+would have failed on existing rows. The migration was hand-edited to `ALTER TYPE … RENAME VALUE`.
+
+**Also changed:** `next.config.ts` allows server actions from `*.app.github.dev` so the app works in
+GitHub Codespaces (untested there).
+
+---
+
 ## Phase 3 — Lead scoring & smart routing ✅
 
 **Date:** 2026-09-20

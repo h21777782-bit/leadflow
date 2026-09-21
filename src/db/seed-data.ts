@@ -122,7 +122,7 @@ export const SEED_LEADS: SeedLead[] = [
 export type SeedFailure = {
   leadEmail: string;
   jobType: string;
-  status: "dead" | "retrying";
+  status: "failed"; // historical records only — no worker handler exists for these HighLevel job types until Phase 5
   attempts: number;
   error: string;
   statusCode: number | null;
@@ -132,7 +132,7 @@ export type SeedFailure = {
 };
 
 export const SEED_FAILURES: SeedFailure[] = [
-  { leadEmail: "rohan@deshpandelogistics.example", jobType: "crm.sync_contact", status: "dead", attempts: 5, error: "[demo seed] HighLevel API responded 503 Service Unavailable after 5 attempts", statusCode: 503, provider: "highlevel", operation: "contacts.upsert", hoursAgo: 20 },
-  { leadEmail: "marcus@reidfitness.example", jobType: "message.send_sms", status: "dead", attempts: 5, error: "[demo seed] SMS provider rejected the message: destination unreachable", statusCode: 400, provider: "sms", operation: "sms.send", hoursAgo: 30 },
-  { leadEmail: "hannah@fischerbikes.example", jobType: "crm.update_opportunity", status: "retrying", attempts: 2, error: "[demo seed] HighLevel API responded 429 Too Many Requests", statusCode: 429, provider: "highlevel", operation: "opportunities.update", hoursAgo: 1 },
+  { leadEmail: "rohan@deshpandelogistics.example", jobType: "crm.sync_contact", status: "failed", attempts: 5, error: "[demo seed] HighLevel API responded 503 Service Unavailable after 5 attempts", statusCode: 503, provider: "highlevel", operation: "contacts.upsert", hoursAgo: 20 },
+  { leadEmail: "marcus@reidfitness.example", jobType: "message.send_sms", status: "failed", attempts: 5, error: "[demo seed] SMS provider rejected the message: destination unreachable", statusCode: 400, provider: "sms", operation: "sms.send", hoursAgo: 30 },
+  { leadEmail: "hannah@fischerbikes.example", jobType: "crm.update_opportunity", status: "failed", attempts: 5, error: "[demo seed] HighLevel API responded 429 Too Many Requests", statusCode: 429, provider: "highlevel", operation: "opportunities.update", hoursAgo: 1 },
 ];

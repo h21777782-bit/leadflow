@@ -15,6 +15,13 @@
       "when": 1789866967550,
       "tag": "0001_scoring_routing",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789871044231,
+      "tag": "0002_automation_engine",
+      "breakpoints": true
     }
   ]
 }
