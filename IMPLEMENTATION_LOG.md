@@ -5,6 +5,118 @@ Newest phase at the top.
 
 ---
 
+## Phase 5 — HighLevel integration layer ✅
+
+### Official docs checked before writing any code (2026-09-22)
+
+All from `marketplace.gohighlevel.com` (the current official docs — the older `highlevel.stoplight.io`
+docs are being deprecated per a banner on the marketplace site). Fetched directly, not taken from
+third-party blogs (several of which repeated a stale/inaccurate claim that "the API has no upsert
+endpoint" — it does; see below).
+
+| What | URL | Finding |
+|---|---|---|
+| Auth | `/docs/Authorization/PrivateIntegrationsToken/` | `Authorization: Bearer <token>` header. A `Version` header is required on every request. |
+| Upsert contact | `/docs/ghl/contacts/upsert-contact` | `POST /contacts/upsert`, body `{ locationId, email, phone, ... }`, response `{ new: boolean, contact: { id, ... }, traceId }`. `new` tells us create-vs-update without a second call. |
+| Duplicate search | `/docs/ghl/contacts/get-duplicate-contact/` | `GET /contacts/search/duplicate?locationId=&email=|number=` — not used by the sync itself (our own duplicate detection already runs locally before a contact exists); kept for later phases. |
+| Create opportunity | `/docs/ghl/opportunities/create-opportunity/` | `POST /opportunities/`, body `{ pipelineId, locationId, name, contactId, status, pipelineStageId?, monetaryValue?, ... }`, `201` response `{ opportunity: {...} }`. |
+| Update opportunity | `/docs/ghl/opportunities/update-opportunity/` | `PUT /opportunities/:id`, same body shape as create (minus `locationId`/`contactId`). |
+| Update opportunity status | `/docs/ghl/opportunities/update-opportunity-status/` | `PUT /opportunities/:id/status`, body `{ status, lostReasonId? }`, `200` `{ success: true }`. |
+| Get pipelines | `/docs/ghl/opportunities/get-pipelines/` | `GET /opportunities/pipelines?locationId=`, response `{ pipelines: [...] }` (stage list per pipeline, used to populate the stage-mapping UI). |
+| Calendar free slots | `/docs/ghl/calendars/get-slots/` | `GET /calendars/:calendarId/free-slots?startDate=&endDate=&timezone=` (max 31-day range), response keyed by `YYYY-MM-DD` → `{ slots: [ISO timestamps] }`. **Recorded for Phase 7 — not implemented now**; Phase 5 only builds the contacts/opportunities sync the finishing prompt asked for. |
+| Create appointment | `/docs/ghl/calendars/create-appointment/` | `POST /calendars/events/appointments`, body `{ calendarId, locationId, contactId, startTime, endTime, title, ... }`. **Recorded for Phase 7 — not implemented now.** |
+| Rate limits | `/docs/other/rate-limits/` | Burst **100 requests / 10s**, daily **200,000 requests/day**, both scoped per app per location. Responses include `X-RateLimit-Remaining`, `X-RateLimit-Daily-Remaining`, `X-RateLimit-Interval-Milliseconds`, `X-RateLimit-Max`, `X-RateLimit-Limit-Daily`. **The docs do not confirm a `Retry-After` header on 429s** — the HTTP client checks for one defensively (many APIs send it even when undocumented) and falls back to the rate-limit headers / our own backoff when it's absent, rather than assuming it exists. |
+
+**Version header discrepancy, noted honestly:** the general auth page shows `Version: 2021-07-28` as
+an *example*, alongside a note that `v3`, `2023-02-21`, `2021-07-28` and `2021-04-15` all exist as
+valid values depending on the resource. Every specific endpoint page fetched above (contacts,
+opportunities, pipelines) showed `Version: v3` for that resource group. `HIGHLEVEL_API_VERSION`'s
+default was changed from `2021-07-28` to `v3` to match what the endpoints actually being called
+document — see `.env.example`.
+
+**Actually run:** `npm run verify` → typecheck ✓, lint 0 warnings ✓, **169 tests passed (13 files)**
+(158 carried over + 11 new CRM integration tests), production build ✓. `npm run demo:crm` runs to
+completion against the dev database.
+
+### What was built
+
+| File | What it does |
+|---|---|
+| `src/server/integrations/crm/types.ts` | `CrmProvider` interface: `upsertContact`, `upsertOpportunity` (create-or-update), `updateOpportunityStatus`, `getPipelines`. |
+| `src/server/integrations/crm/mock-provider.ts` | `MockCrmProvider` — deterministic fake ids, DEMO fault injection (`off`/`429`/`503`/`timeout`/`401`) via `app_settings`, same pattern as the Phase 4 messaging mock. Still logs every simulated call to `integration_calls` so the Integrations page shows activity in the default (mock) demo state. |
+| `src/server/integrations/crm/http-client.ts` | Shared HTTP client for the real API: `Authorization`/`Version` headers, `AbortController` timeout (`HIGHLEVEL_HTTP_TIMEOUT_MS`), 429 → reads `Retry-After` and attaches it to the thrown error, classifies every non-2xx via the existing `kindForHttpStatus`, and logs to `integration_calls` (never the headers, so the token is never persisted). |
+| `src/server/integrations/crm/highlevel-provider.ts` | Real provider — every endpoint/field name matches the doc-check table above, nothing guessed. |
+| `src/server/integrations/crm/index.ts` | `getCrmProvider()` — the one place that switches Mock vs. HighLevel by `MOCK_MODE`, same shape as the messaging provider switch. |
+| `src/server/workflows/crm-sync.ts` | The outbox: `crm.sync_contact`, `crm.sync_opportunity`, `crm.update_opportunity` handlers. Idempotent by construction — `ghl_contact_id`/`ghl_opportunity_id` are stored once and every later sync updates that same record via `PUT`, never `POST`s a second one. |
+| `src/server/services/contacts.ts`, `opportunities.ts` | Enqueue the outbox jobs after the triggering write commits (contact create/update/merge → `crm.sync_contact`; opportunity create → `crm.sync_opportunity`; stage change → `crm.update_opportunity`). Enqueue failures are caught and audited, never allowed to undo the write they followed. |
+| `src/app/actions/integrations.ts`, `src/components/integrations/controls.tsx`, `src/app/(app)/integrations/page.tsx` (rewritten) | Test connection button (calls the cheapest read, `getPipelines`), sync status counts, the demo failure switch (mock mode only), an editable stage-mapping form per pipeline stage, recent integration calls. |
+| `scripts/demo-crm.ts` (`npm run demo:crm`) | DEMO: simulated outage (503) → retry scheduled → switch off → worker recovers → full `integration_calls` + `audit_logs` trail printed. |
+| `tests/crm-integration.test.ts` | 11 tests: success, 429 (Retry-After captured), 503-then-recovery, 401 (permanent), timeout (a fetch mock that actually honors `AbortSignal`, not just a hung promise), token never logged, idempotent re-sync for both contacts and opportunities (create once, update thereafter), and the seeded `crm.sync_contact` / `crm.update_opportunity` failure jobs are now accepted by `retryJobNow`. |
+
+**Job type naming, decided against the letter of the finishing prompt:** the prompt's own example
+names the three outbox jobs `crm.sync_contact`, `crm.sync_opportunity`, `crm.update_stage`. The
+Phase-1 seed data (`SEED_FAILURES` in `db/seed-data.ts`, written before Phase 5 existed) already
+seeded historical failure records typed `crm.sync_contact` and **`crm.update_opportunity`** — not
+`crm.update_stage`. Since the finishing prompt's actual requirement is "the seeded HighLevel failure
+jobs must become retryable," matching the *already-committed* seed data mattered more than the
+prompt's illustrative name, so the real job type is `crm.update_opportunity`. It also turned out to
+be a better name than planned: `crm.sync_opportunity` and `crm.update_opportunity` share one handler
+(`syncOpportunity()`) because both mean exactly the same thing — "make HighLevel match this
+opportunity's current database state now" — so a single idempotent function does both jobs.
+
+**Ordering, decided pragmatically:** an opportunity can't be synced to HighLevel before its contact
+has a `ghl_contact_id` (HighLevel opportunities require a contact id). Rather than build a job
+dependency graph, `crm.sync_opportunity`/`crm.update_opportunity` just throw a `TransientJobError`
+when the contact hasn't synced yet, so the existing backoff-and-retry machinery handles the ordering
+for free. `npm run demo:crm`'s own output shows this happening naturally: the opportunity sync job
+logs "has not been synced to HighLevel yet — retrying until it is" and backs off, while the contact
+sync job (enqueued at the same moment) succeeds on its own schedule.
+
+### Errors encountered and fixes
+
+1. **A real bug, only found by running the demo script, not by the tests.** `crm-sync.ts`'s handlers
+   required `HIGHLEVEL_LOCATION_ID`/`HIGHLEVEL_PIPELINE_ID` unconditionally, even in `MOCK_MODE` where
+   the mock provider never uses them. `npm run demo:crm` failed immediately with "HIGHLEVEL_LOCATION_ID
+   is not configured" against the dev `.env.local` (which correctly leaves those blank in mock mode).
+   `tests/crm-integration.test.ts` never caught this because it explicitly sets those env vars at the
+   top of the file to exercise the *real* HTTP client — masking the exact bug a genuine demo run
+   surfaced immediately. Fixed with `requireLocationId()`/`requirePipelineId()` helpers that fall back
+   to a placeholder in mock mode and only throw for real when `MOCK_MODE=false`. Lesson recorded: a
+   green test suite is not the same as having run the thing.
+2. **The claimed-batch race in my own new tests.** The first draft of the idempotent-opportunity-sync
+   test called `claimDueJobs` once for the contact job and again later for the opportunity job — but
+   both are enqueued at the same instant (`createContact` enqueues both), so the *first* call already
+   claimed and locked the opportunity job too, leaving nothing for the second call to find. Fixed by
+   claiming once and picking both jobs out of that single batch, same as the real worker's loop would.
+3. **`callsForOperation("contacts.upsert")[0]` picked up an old seeded row, not the new one.** The seed
+   data already contains `integration_calls` rows with `operation: "contacts.upsert"` (from
+   `SEED_FAILURES`). The test helper selected without an explicit order, so Postgres could return the
+   old row first. Fixed by ordering `desc(createdAt)`.
+4. **A hanging-promise timeout mock never actually times out.** The first version of the "timeout"
+   test mocked `fetch` to return `new Promise(() => {})` — a promise that never settles and, critically,
+   never listens for the `AbortController`'s signal, so calling `.abort()` on it does nothing and the
+   test just hung until Vitest's own test timeout killed it. Real `fetch` rejects when its `signal`
+   fires; the mock now does too (`signal.addEventListener("abort", …)`), which is what actually proves
+   the HTTP client's own timeout logic works, not just that *something* eventually times out.
+5. **`env.test.ts` hardcoded the old `HIGHLEVEL_API_VERSION` default** (`2021-07-28`); updated to `v3`
+   to match the doc-check finding above.
+
+### Not verified this phase (stated honestly)
+
+- **No real HighLevel account or credentials were used or requested.** Every claim above about the
+  live API (endpoints, fields, headers) comes from reading the current official docs, not from a
+  request that actually reached `services.leadconnectorhq.com`. If real credentials are provided later,
+  the real-mode path should be exercised once before relying on it for an interview demo.
+- The exact JSON shape HighLevel returns on a genuine 429/401/503 was not observed directly (no live
+  account) — the client's error parsing (`errorMessage()`) reads a `message` field defensively and
+  falls back to a generic `HTTP <status>` string if the body doesn't have one, so it degrades safely
+  either way, but this fallback path itself is untested against a real error body.
+- `Retry-After` on a real 429 was not observed (see the rate-limits doc-check note above); the parser
+  handles both a plain integer-seconds value and an HTTP-date value, per the general HTTP spec for that
+  header, but only the integer-seconds form was exercised in tests.
+- Calendar endpoints (free slots, create appointment) were recorded in the doc-check table for Phase 7
+  but no code was written against them — out of scope for this phase.
+
 ## Phase 4 — Automation engine ✅
 
 **Status:** complete. Core engine (queue, worker, workflow) was built and verified in an earlier

@@ -262,7 +262,42 @@ later. The web process only ever writes to Postgres; it never runs the job itsel
 the worker must be deployed as its own always-on service (Railway/Render/Fly), never inside a Vercel
 serverless function — see `IMPLEMENTATION_LOG.md`, Phase 4, "Deployment notes".
 
-## 11. Reset before an interview
+## 11. Phase 5 — HighLevel integration (outbox sync, mock/live provider)
+
+> `MOCK_MODE=true` by default — nothing here contacts a real HighLevel account.
+
+### 11a. One-command terminal demo
+
+```bash
+npm run demo:crm       # outage (503) → retry scheduled → recovery → full audit trail
+```
+
+### 11b. In the browser
+
+1. Create any lead (`/contacts/new` or `npm run demo:a`) → open `/integrations`.
+2. **Sync status** shows the contact/opportunity now counted as synced (`ghl_contact_id` /
+   `ghl_opportunity_id` stored) once the worker has run the outbox job — same 30s delay pattern as the
+   nurture follow-ups, or force it with `npm run worker:once`.
+3. **Test connection** → calls the provider's `getPipelines()` (cheapest read) and reports pipeline/stage
+   counts — works in mock mode too, so it's safe to click any time.
+4. **Demo failure switch** → set to `503`, create a new lead, wait/`worker:once` → its sync job fails and
+   is shown in **Recent integration calls**; switch back to `off` and it recovers on its own retry.
+5. **Pipeline stage mapping** → set a HighLevel stage id against any of our 9 stages (any string works in
+   mock mode) → move a lead through `/pipeline` → the corresponding `crm.update_opportunity` job carries
+   that mapped id.
+6. `/failed-automations` → the seeded `crm.sync_contact` job (Rohan Deshpande) now has a working **Retry
+   Now** button instead of "no handler exists yet".
+
+### 11c. Tests
+
+```bash
+npx vitest run tests/crm-integration.test.ts   # 11 tests: mocked-fetch HTTP behavior + idempotent re-sync
+```
+
+Point at: *never logs the bearer token*, *idempotent re-sync: an opportunity is created once … then
+updated in place on every later sync*, and *the seeded HighLevel failure jobs … are now retryable*.
+
+## 12. Reset before an interview
 
 ```bash
 npm run db:seed        # restores the exact demo dataset

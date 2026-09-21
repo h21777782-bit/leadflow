@@ -12,6 +12,7 @@ import { workerHeartbeats } from "@/db/schema";
 import { getEnv } from "@/lib/env";
 import { PermanentJobError } from "@/lib/job-errors";
 import { claimDueJobs, completeJob, failJob, recoverAbandonedJobs, type Job } from "@/server/queue/queue";
+import { CRM_SYNC_CONTACT, CRM_SYNC_OPPORTUNITY, CRM_UPDATE_OPPORTUNITY, handleSyncContact, handleSyncOpportunity, handleUpdateOpportunity } from "@/server/workflows/crm-sync";
 import { FOLLOWUP_JOB, handleFollowUp, type HandlerResult } from "@/server/workflows/nurture";
 
 type Handler = (db: Database, job: Job, workerId: string) => Promise<HandlerResult>;
@@ -19,6 +20,9 @@ type Handler = (db: Database, job: Job, workerId: string) => Promise<HandlerResu
 /** Job types this worker can execute. Anything else fails permanently with a clear message. */
 export const HANDLERS: Record<string, Handler> = {
   [FOLLOWUP_JOB]: handleFollowUp,
+  [CRM_SYNC_CONTACT]: handleSyncContact,
+  [CRM_SYNC_OPPORTUNITY]: handleSyncOpportunity,
+  [CRM_UPDATE_OPPORTUNITY]: handleUpdateOpportunity,
 };
 export const SUPPORTED_JOB_TYPES = Object.keys(HANDLERS);
 

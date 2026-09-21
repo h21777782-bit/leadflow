@@ -20,6 +20,7 @@ import { SERVICE_LABEL, type Service } from "@/lib/pipeline";
 import { validateContact, type FieldErrors, type ValidContact } from "@/lib/validation/contact";
 import { writeAudit } from "./audit";
 import { processLeadChange, type LeadChangeOutcome } from "./lead-intelligence";
+import { enqueueContactSync, enqueueOpportunitySync } from "@/server/workflows/crm-sync";
 import { startNurtureWorkflow, type StartResult } from "@/server/workflows/nurture";
 import type { Actor, DbOrTx } from "./types";
 
@@ -76,6 +77,15 @@ export async function findDuplicates(
       ...(keys.phoneE164 && r.phoneE164 === keys.phoneE164 ? (["phone"] as const) : []),
     ],
   }));
+}
+
+/** Never blocks or undoes the write it's called after if enqueueing fails. */
+async function safeEnqueueContactSync(db: Database, actor: Actor, contactId: string): Promise<void> {
+  try {
+    await enqueueContactSync(db, contactId);
+  } catch (err) {
+    await writeAudit(db, actor, { eventType: "crm.sync_enqueue_failed", entityType: "contact", entityId: contactId, contactId, message: `Could not enqueue HighLevel sync: ${err instanceof Error ? err.message : String(err)}` });
+  }
 }
 
 async function assertOwnerExists(db: DbOrTx, ownerId: string | undefined): Promise<FieldErrors | null> {
@@ -181,6 +191,15 @@ export async function createContact(
     } catch (err) {
       workflow = { status: "skipped", reason: `Could not start workflow: ${err instanceof Error ? err.message : String(err)}` };
       await writeAudit(db, actor, { eventType: "workflow.start_failed", entityType: "contact", entityId: created.contactId, contactId: created.contactId, message: workflow.reason });
+    }
+  }
+  // Phase 5: outbox — enqueue the HighLevel sync jobs.
+  await safeEnqueueContactSync(db, actor, created.contactId);
+  if (created.opportunityId) {
+    try {
+      await enqueueOpportunitySync(db, created.opportunityId, created.contactId);
+    } catch (err) {
+      await writeAudit(db, actor, { eventType: "crm.sync_enqueue_failed", entityType: "opportunity", entityId: created.opportunityId, contactId: created.contactId, message: `Could not enqueue HighLevel sync: ${err instanceof Error ? err.message : String(err)}` });
     }
   }
   return { status: "created", ...created, intelligence, workflow };
@@ -358,6 +377,7 @@ export async function updateContact(db: Database, actor: Actor, id: string, rawI
     if (r.status === "not_found") return r;
     if (r.status === "unchanged") return { status: "unchanged", contactId: id };
     const intelligence = await processLeadChange(db, actor, id, "contact.updated");
+    await safeEnqueueContactSync(db, actor, id);
     return { status: "updated", contactId: id, changedFields: r.changedFields, intelligence };
   } catch (err) {
     if (uniqueViolation(err)?.startsWith("contacts_")) {
@@ -381,6 +401,7 @@ export async function mergeIntoContact(db: Database, actor: Actor, id: string, r
     if (r.status === "not_found") return r;
     if (r.status === "unchanged") return { status: "unchanged", contactId: id };
     const intelligence = await processLeadChange(db, actor, id, "contact.merged");
+    await safeEnqueueContactSync(db, actor, id);
     return { status: "merged", contactId: id, changedFields: r.changedFields, intelligence };
   } catch (err) {
     if (uniqueViolation(err)?.startsWith("contacts_")) {

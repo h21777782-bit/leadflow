@@ -473,3 +473,75 @@ Lead create hota hai
 ## 8. Interview mein kya bolein
 
 *"Job queue Postgres mein hai, memory mein nahi — kyunki web app aur worker do alag processes hain (Vercel pe web app serverless hai, jo hamesha chalta process nahi rakh sakta). Dono ek hi database dekhte hain. Main real do-process test kar chuka hoon: production web server ek terminal mein, worker bilkul alag terminal mein — lead web se banaya, alag worker process ne use pick karke complete kiya, aur dashboard (jo web process serve karta hai) ne wo result dikhaya. Isse pata chalta hai ki architecture sach mein distributed hai, sirf code mein nahi."*
+
+---
+
+# Phase 5 — HighLevel Integration Layer (Hinglish)
+
+## 1. Humne kya banaya — ek line mein
+
+Har contact/opportunity change ke baad ek **outbox job** queue mein jaata hai (wahi Phase 4 wala queue), jo HighLevel CRM mein us record ko sync karta hai. Do implementations hain ek **CrmProvider interface** ke peeche: **MockCrmProvider** (default, kuch bhi asli nahi jaata, demo fault-injection switch hai) aur **HighLevelProvider** (asli HTTP calls, sirf `MOCK_MODE=false` par).
+
+## 2. Docs pehle, code baad mein
+
+Koi bhi endpoint likhne se pehle `marketplace.gohighlevel.com` ke asli docs padhe — kai third-party blogs galat cheezein bol rahe the (jaise "upsert endpoint hai hi nahi", jo sach nahi hai). Har URL aur check karne ki date `IMPLEMENTATION_LOG.md` mein likhi hai. **Koi endpoint guess nahi kiya.**
+
+## 3. Outbox pattern — kaam kaise karta hai
+
+```
+Contact create/update ho gaya (transaction commit ke BAAD)
+  → enqueueContactSync() → job "crm.sync_contact" (idempotency key: contactId + second-resolution timestamp)
+  → worker job claim karta hai
+  → provider.upsertContact() → HighLevel se contact id milta hai
+  → contacts.ghl_contact_id column mein SAVE karo (ek baar)
+  → agli baar sync ho to ye SAME id use karo (PUT/update), naya record kabhi nahi banega
+```
+
+**Idempotency ka asli matlab yahan:** `ghl_contact_id` / `ghl_opportunity_id` ek baar store hota hai aur har agli sync usi ko update karti hai — chahe job kitni baar retry ho, HighLevel mein sirf EK record banta hai.
+
+## 4. Opportunity sync — ordering ka problem, simple solution
+
+HighLevel mein opportunity banane ke liye pehle contact ka id chahiye. Lekin humara queue jobs ko ek dusre ka wait karna nahi sikhaata (no dependency graph). Isliye: agar `crm.sync_opportunity` job chale aur contact abhi tak sync nahi hua (`ghl_contact_id` null hai), to ye simply ek **TransientJobError** throw kar deta hai — matlab "retry karo baad mein". Backoff apne aap thodi der baad phir try karega, tab tak contact wala job complete ho chuka hoga. Koi complex scheduling nahi — sirf retry se ordering solve ho jaati hai.
+
+## 5. Real HTTP client — 429, timeout, error classification
+
+File: `src/server/integrations/crm/http-client.ts`
+
+- Har call mein `Authorization: Bearer <token>` aur `Version` header jaata hai.
+- **Timeout**: `AbortController` se, `HIGHLEVEL_HTTP_TIMEOUT_MS` (default 10s) ke baad request cancel — transient error maana jaata hai.
+- **429 (rate limit)**: agar response mein `Retry-After` header hai to wo delay use hota hai; nahi to normal exponential backoff.
+- **Error classification**: wahi `kindForHttpStatus()` jo Phase 4 mein bana tha — 401/400 = permanent (retry se fayda nahi), 429/5xx/timeout = transient (retry karo).
+- Har call `integration_calls` table mein log hota hai — **headers kabhi log nahi hote**, isliye token kabhi database mein nahi jaata.
+
+## 6. Mock provider bhi logging karta hai — kyun?
+
+Default state `MOCK_MODE=true` hai, isliye demo/interview mein asli HighLevel kabhi nahi lagta. Lekin agar mock provider kuch bhi log na kare, to Integrations page khaali dikhega. Isliye `MockCrmProvider` bhi wahi `integration_calls` table mein har simulated call likhta hai — demo mein activity dikhti hai, bina asli API ke.
+
+## 7. Ek asli bug jo sirf demo chalane se mila (tests se nahi)
+
+`crm-sync.ts` ke handlers shuru mein `HIGHLEVEL_LOCATION_ID` hamesha maangte the — chahe mock mode ho ya nahi. Tests pass ho rahe the kyunki test file ne khud hi ye env variable set kar diya tha (fake value). Lekin jab maine `npm run demo:crm` chalaya (jahan `.env.local` mein ye khaali hai, jaisa mock mode mein hona chahiye), turant fail ho gaya: *"HIGHLEVEL_LOCATION_ID is not configured"*. Fix: `requireLocationId()` helper — mock mode mein placeholder value use karo, sirf live mode (`MOCK_MODE=false`) mein asli value maango.
+
+**Interview mein kaam ki baat:** *"Tests hara (green) hona iska matlab nahi ki maine actually chala kar dekha. Is bug ne mujhe wahi sikhaya — isliye har phase mein main asli demo script bhi chalata hoon, sirf test suite pe bharosa nahi karta."*
+
+## 8. Important files (Phase 5)
+
+| File | Kaam |
+|---|---|
+| `src/server/integrations/crm/types.ts` | `CrmProvider` interface |
+| `src/server/integrations/crm/mock-provider.ts` | Simulated + fault injection + logging |
+| `src/server/integrations/crm/http-client.ts` | Asli HTTP client: auth, timeout, 429, logging |
+| `src/server/integrations/crm/highlevel-provider.ts` | Asli endpoints (docs se, guess nahi) |
+| `src/server/workflows/crm-sync.ts` | Outbox handlers: sync_contact, sync_opportunity, update_opportunity |
+| `src/app/(app)/integrations/page.tsx` | Test connection, sync status, failure switch, stage mapping |
+| `scripts/demo-crm.ts` | Outage → retry → recovery demo |
+| `tests/crm-integration.test.ts` | 11 tests: mocked fetch (success/429/503/401/timeout) + real-DB idempotency |
+
+## 9. Kya fail ho sakta hai
+
+| Failure | Kaise pata chalta hai | Recovery |
+|---|---|---|
+| HighLevel down (simulated 503) | Job `retry_scheduled`, `/integrations` pe recent calls mein dikhta hai | Automatic retry, backoff ke saath |
+| Bad token (401) | Job `failed` turant (permanent) | Token fix karo, phir manually Retry Now |
+| Contact abhi tak sync nahi hua | Opportunity sync job transient error deta hai | Automatic retry — jab tak contact sync ho jaaye |
+| Rate limited (429) | `Retry-After` respect hota hai | Automatic retry us delay ke baad |
+| Stage mapping missing | Opportunity phir bhi sync hoti hai, bas stage id `null` jaata hai | Admin `/integrations` pe mapping bhar sakta hai |

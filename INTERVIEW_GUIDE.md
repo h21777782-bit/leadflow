@@ -5,7 +5,8 @@
 > All data is fictional. Failure scenarios are demo/test scenarios run locally.
 
 The full project walkthrough (2-minute and 5-minute versions) will be added in Phase 9.
-This file currently covers **Phase 3: scoring and routing** and **Phase 4: the automation engine**.
+This file currently covers **Phase 3: scoring and routing**, **Phase 4: the automation engine**,
+and **Phase 5: the HighLevel integration layer**.
 
 ---
 
@@ -115,3 +116,49 @@ Before the interview: `npm run db:seed`, then in two terminals `npm run dev` and
 6. Terminal: `npx vitest run tests/automation.integration.test.ts` → point at *concurrent claiming by several workers never claims the same job twice* and *a stale worker cannot overwrite the result once its lease has been recovered*.
 
 Alternative, fully scripted: `npm run demo:a && npm run demo:b && npm run demo:c` runs the success, failure/retry, and cancellation stories back to back through the real services.
+
+---
+
+## Phase 5: HighLevel integration — 2-minute explanation (say this)
+
+"Every time a contact or opportunity changes, LeadFlow enqueues a sync job onto the same job queue the follow-up engine uses — an outbox pattern. That job is handled by a `CrmProvider` interface with two implementations: a mock, which is the default and never contacts anything real, and a real HighLevel provider, used only when `MOCK_MODE=false` and credentials are set. Neither the services that create contacts nor the worker that runs the job know which one they're talking to.
+
+Before writing any of the real provider, I read HighLevel's actual current documentation — not blog posts, several of which confidently state things that turned out to be wrong, like claiming the API has no upsert endpoint when it does. Every endpoint, method and field name in the real provider traces back to a specific doc URL I recorded with the date I checked it.
+
+Idempotency here means something specific: HighLevel's contact and opportunity ids are stored once, in `ghl_contact_id` and `ghl_opportunity_id`, and every later sync updates that same record instead of creating a new one — however many times the job retries. The HTTP client itself handles the operational reality of a third-party API: a request timeout via AbortController, 429 responses with their Retry-After delay respected, and every non-2xx response classified as either worth retrying or not, reusing the same transient/permanent classification the follow-up engine already had. Every call — success or failure — is logged, but never the Authorization header, so a token can never end up in a log table."
+
+---
+
+## HighLevel integration — technical questions with accurate answers
+
+**1. How do you avoid creating a duplicate opportunity in HighLevel if the sync job is retried?**
+> The opportunity's HighLevel id (`ghl_opportunity_id`) is stored on our own row the first time it's created. Every later sync — from a stage change, a value update, or a genuine job retry — checks for that stored id first: if present, it calls HighLevel's update endpoint (`PUT /opportunities/:id`) instead of create. I have a test that walks through exactly this: create once (asserts a `POST` happened and the id got stored), then trigger a stage change (asserts a `PUT` happened, and the stored id is unchanged, not a new one).
+
+**2. HighLevel opportunities need a contact id. What happens if the opportunity sync job runs before the contact sync job?**
+> I considered building a real job-dependency graph and decided it wasn't worth the complexity at this scale. Instead, if the opportunity sync handler loads its contact and finds no `ghl_contact_id` yet, it throws a transient error — "hasn't been synced yet, retrying" — and the existing backoff-and-retry machinery from Phase 4 just handles it: the job retries a few seconds later, by which point the contact's own sync job has almost always already completed. It's not perfectly ordered, but it's self-correcting, and I can see it happen live in `npm run demo:crm`'s output.
+
+**3. Walk me through what happens on a real 429 from HighLevel.**
+> The HTTP client reads the response status, and if it's 429, checks for a `Retry-After` header. If present, I convert it to milliseconds and attach it to the thrown error — the queue's existing retry logic uses that as the next run time instead of its own default backoff, so a job actually waits as long as the provider asked rather than guessing. If the header is absent, it falls back to the same exponential-backoff-with-jitter the follow-up engine uses. Every attempt, successful or not, is logged to an `integration_calls` table with the status code and duration, so the Integrations page shows exactly what happened without anyone reading server logs.
+
+**4. Why does the mock provider also write to the integration_calls log?**
+> Because `MOCK_MODE=true` is the default, and if the mock provider stayed silent, the Integrations page — status codes, recent calls, the whole audit trail — would look empty in the normal demo state. So the mock logs every simulated call exactly the way the real provider does, including simulated failures from its fault-injection switch. That switch lets me show a live outage and recovery on demand without touching any real account.
+
+**5. What's a bug you actually found while building this, not just something you're claiming you'd catch?**
+> The sync handlers required `HIGHLEVEL_LOCATION_ID` and `HIGHLEVEL_PIPELINE_ID` unconditionally — even when running in mock mode, where the mock provider never uses them at all. My test suite never caught it, because the tests explicitly set those variables to exercise the real HTTP client. It was `npm run demo:crm`, run against the actual dev environment where those are correctly left blank in mock mode, that failed immediately. That's exactly why I run the demo scripts myself instead of trusting a green test suite — tests prove the code I thought to test; running the thing proves the code as it's actually configured.
+
+**Likely follow-ups**
+- *"Why not call HighLevel synchronously, right when the contact is created?"* → Same reasoning as the follow-up engine: a third-party API can be slow, rate-limited, or briefly down, and none of that should block or fail the local write the salesperson is waiting on. Queueing it means the contact is saved instantly and the sync happens — and retries — independently.
+- *"How would you find a lead's HighLevel record from ours, or vice versa?"* → `contacts.ghl_contact_id` and `opportunities.ghl_opportunity_id` are stored and unique-indexed in our schema (added back in Phase 1, before this integration existed, specifically to anticipate it).
+- *"What isn't verified yet?"* → No request has ever reached a real HighLevel account — every endpoint claim comes from reading the current docs, and the mocked-fetch tests prove the client's own logic (timeouts, retries, classification, logging) works, not that a live account behaves identically. That's stated explicitly in `IMPLEMENTATION_LOG.md` rather than implied to work.
+
+---
+
+## Step-by-step live demo — Phase 5 (≈3 minutes)
+
+1. **`/integrations`** → point at mock mode, sync status counts, the pipeline stage mapping form.
+2. **Test connection** → click it — works even in mock mode (calls the cheapest read endpoint) — shows pipeline/stage counts.
+3. Set the demo failure switch to **503**, create a lead (or `npm run demo:a`) → its sync job fails, shown in **Recent integration calls** with the status code and error.
+4. Switch back to **off** → wait (or `npm run worker:once`) → the same job recovers; point out the attempt history in the underlying job.
+5. **`/failed-automations`** → the seeded `crm.sync_contact` failure (from Phase 1's seed data) now has a working **Retry Now** button, where it previously said "no handler exists yet".
+6. Terminal: `npm run demo:crm` → narrate the outage → retry → recovery → audit trail as it prints.
+7. Terminal: `npx vitest run tests/crm-integration.test.ts` → point at the idempotent re-sync tests and the "never logs the bearer token" test.

@@ -15,7 +15,25 @@ import type { FieldErrors } from "@/lib/validation/contact";
 import { writeAudit } from "./audit";
 import { processLeadChange } from "./lead-intelligence";
 import { insertOpportunity } from "./contacts";
+import { enqueueOpportunityStageSync, enqueueOpportunitySync } from "@/server/workflows/crm-sync";
 import type { Actor } from "./types";
+
+/** Never blocks or undoes the write it's called after if enqueueing fails. */
+async function safeEnqueueOpportunitySync(db: Database, actor: Actor, opportunityId: string, contactId: string): Promise<void> {
+  try {
+    await enqueueOpportunitySync(db, opportunityId, contactId);
+  } catch (err) {
+    await writeAudit(db, actor, { eventType: "crm.sync_enqueue_failed", entityType: "opportunity", entityId: opportunityId, contactId, message: `Could not enqueue HighLevel sync: ${err instanceof Error ? err.message : String(err)}` });
+  }
+}
+
+async function safeEnqueueStageSync(db: Database, actor: Actor, opportunityId: string, contactId: string): Promise<void> {
+  try {
+    await enqueueOpportunityStageSync(db, opportunityId, contactId);
+  } catch (err) {
+    await writeAudit(db, actor, { eventType: "crm.sync_enqueue_failed", entityType: "opportunity", entityId: opportunityId, contactId, message: `Could not enqueue HighLevel sync: ${err instanceof Error ? err.message : String(err)}` });
+  }
+}
 
 // ── Create ───────────────────────────────────────────────────────────────────
 const createOppSchema = z.object({
@@ -52,7 +70,10 @@ export async function createOpportunity(
     });
     return { status: "created" as const, opportunityId: id };
   });
-  if (r.status === "created") await processLeadChange(db, actor, contactId, "opportunity.created");
+  if (r.status === "created") {
+    await processLeadChange(db, actor, contactId, "opportunity.created");
+    await safeEnqueueOpportunitySync(db, actor, r.opportunityId, contactId);
+  }
   return r;
 }
 
@@ -78,7 +99,10 @@ export async function changeStage(db: Database, actor: Actor, input: ChangeStage
   if (r.status === "changed") {
     // Stage affects the appointment factor and whether the lead still needs an owner.
     const [o] = await db.select({ contactId: opportunities.contactId }).from(opportunities).where(eq(opportunities.id, input.opportunityId));
-    if (o) await processLeadChange(db, actor, o.contactId, "stage.changed");
+    if (o) {
+      await processLeadChange(db, actor, o.contactId, "stage.changed");
+      await safeEnqueueStageSync(db, actor, input.opportunityId, o.contactId);
+    }
   }
   return r;
 }

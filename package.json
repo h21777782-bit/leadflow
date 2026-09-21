@@ -21,6 +21,7 @@
     "demo:a": "tsx scripts/demo-a.ts",
     "demo:b": "tsx scripts/demo-b.ts",
     "demo:c": "tsx scripts/demo-c.ts",
+    "demo:crm": "tsx scripts/demo-crm.ts",
     "worker": "tsx scripts/worker.ts",
     "worker:once": "tsx scripts/worker.ts --once"
   },

@@ -8,7 +8,7 @@ describe("parseEnv", () => {
     const env = parseEnv(base);
     expect(env.MOCK_MODE).toBe(true);
     expect(env.HIGHLEVEL_API_BASE_URL).toBe("https://services.leadconnectorhq.com");
-    expect(env.HIGHLEVEL_API_VERSION).toBe("2021-07-28");
+    expect(env.HIGHLEVEL_API_VERSION).toBe("v3");
   });
 
   it("rejects a missing DATABASE_URL with a readable error", () => {

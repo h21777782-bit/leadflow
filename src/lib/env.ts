@@ -31,7 +31,10 @@ const envSchema = z
 
     // HighLevel (only required when MOCK_MODE=false — enforced below).
     HIGHLEVEL_API_BASE_URL: z.url().default("https://services.leadconnectorhq.com"),
-    HIGHLEVEL_API_VERSION: z.string().default("2021-07-28"),
+    // Contacts/opportunities/pipelines endpoints document "Version: v3" as of the 2026-09-22 check
+    // (see IMPLEMENTATION_LOG.md, Phase 5) — some older resource groups still use a date string.
+    HIGHLEVEL_API_VERSION: z.string().default("v3"),
+    HIGHLEVEL_HTTP_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(10_000),
     HIGHLEVEL_PRIVATE_TOKEN: z.string().optional(),
     HIGHLEVEL_LOCATION_ID: z.string().optional(),
     HIGHLEVEL_PIPELINE_ID: z.string().optional(),

@@ -72,6 +72,7 @@ docker compose up -d
 | `npm run demo:a` | DEMO: success path — new lead → scored/routed → follow-up → worker → simulated send |
 | `npm run demo:b` | DEMO: simulated failure → retry → recovery (proves exactly one message despite the failure) |
 | `npm run demo:c` | DEMO: lead replies → follow-up skipped, workflow stopped |
+| `npm run demo:crm` | DEMO: simulated HighLevel outage (503) → retry → recovery → full audit trail |
 
 ---
 
@@ -90,12 +91,14 @@ message listing every invalid variable. Secrets are never shown in the UI.
 | `DEFAULT_CURRENCY` | no (`USD`) | |
 | `MOCK_MODE` | no (`true`) | `true` = HighLevel calls go to the isolated mock provider |
 | `HIGHLEVEL_PRIVATE_TOKEN` | when `MOCK_MODE=false` | Private Integration token (sub-account level) |
-| `HIGHLEVEL_LOCATION_ID` | when `MOCK_MODE=false` | Sub-account (location) id |
-| `HIGHLEVEL_PIPELINE_ID`, `HIGHLEVEL_CALENDAR_ID` | later phases | |
+| `HIGHLEVEL_LOCATION_ID` | when `MOCK_MODE=false` | Sub-account (location) id — ignored by the mock provider |
+| `HIGHLEVEL_PIPELINE_ID` | when `MOCK_MODE=false` | The single pipeline opportunities sync into |
+| `HIGHLEVEL_CALENDAR_ID` | Phase 7 | |
 | `HIGHLEVEL_API_BASE_URL` | no | Defaults to `https://services.leadconnectorhq.com` |
-| `HIGHLEVEL_API_VERSION` | no | Defaults to `2021-07-28` (sent as the `Version` header) |
-| `HIGHLEVEL_WEBHOOK_PUBLIC_KEY` | later phases | Ed25519 key for `X-GHL-Signature` verification |
-| `WEBHOOK_SIGNING_SECRET` | later phases | HMAC secret for website / n8n webhooks |
+| `HIGHLEVEL_API_VERSION` | no | Defaults to `v3` (sent as the `Version` header) — see `IMPLEMENTATION_LOG.md`, Phase 5, for the doc-check behind this default |
+| `HIGHLEVEL_HTTP_TIMEOUT_MS` | no (`10000`) | Real HighLevel calls are aborted and treated as a transient failure past this |
+| `HIGHLEVEL_WEBHOOK_PUBLIC_KEY` | Phase 6 | Ed25519 key for `X-GHL-Signature` verification |
+| `WEBHOOK_SIGNING_SECRET` | Phase 6 | HMAC secret for website / n8n webhooks |
 | `FOLLOWUP_1_DELAY_SECONDS` | no (`30`) | Delay before the first follow-up (kept short for demos) |
 | `JOB_MAX_ATTEMPTS` | no (`5`) | Retries before a job is marked `failed` |
 | `RETRY_BASE_DELAY_SECONDS` / `RETRY_MAX_DELAY_SECONDS` | no (`15` / `3600`) | Exponential backoff bounds |
@@ -104,8 +107,8 @@ message listing every invalid variable. Secrets are never shown in the UI.
 | `WORKER_BATCH_SIZE` | no (`5`) | Jobs claimed per poll |
 | `DATABASE_PREPARE` | no (`true`) | Set `false` on Supabase's transaction pooler (port 6543), which doesn't support prepared statements |
 
-The HighLevel values are re-verified against the official docs in Phase 5,
-before any real API call is written.
+The HighLevel field names and endpoints were checked against the official docs before Phase 5
+was written (see `IMPLEMENTATION_LOG.md`) — no real API call has been made against a live account yet.
 
 ---
 
@@ -129,8 +132,15 @@ one **job** per follow-up step in a Postgres-backed queue → a **separate worke
 (`npm run worker`, not part of the web app) claims due jobs with `SKIP LOCKED`, runs the
 `new_lead_nurture` handler, retries transient failures with backoff, and stops on reply /
 appointment / won / lost / opt-out / manual cancel. Messaging is a `MessagingProvider`
-interface with only a `MockMessagingProvider` implementation so far (real providers arrive
-in Phase 5, behind the same interface HighLevel's `CrmProvider` will use).
+interface with only a `MockMessagingProvider` implementation.
+
+Built as of Phase 5: every contact/opportunity write also enqueues an **outbox job**
+(`crm.sync_contact`, `crm.sync_opportunity`, `crm.update_opportunity`) through the same
+queue and worker. A `CrmProvider` interface has two implementations — `MockCrmProvider`
+(default, `MOCK_MODE=true`, with a DEMO fault-injection switch on the Integrations page) and
+`HighLevelProvider` (real HTTP calls, only used when `MOCK_MODE=false` and credentials are
+set). `ghl_contact_id`/`ghl_opportunity_id` are stored once and reused, so a record is never
+created twice in HighLevel however many times its sync job retries.
 
 ```
 Web app (Vercel-shaped, request/response only)      Worker (Railway-shaped, always-on)
@@ -145,14 +155,14 @@ each response, and the worker is an infinite poll loop. See `IMPLEMENTATION_LOG.
 separate OS processes; the full step-by-step deployment guide is Phase 9's `DEPLOYMENT.md`
 (nothing has been deployed yet).
 
-Planned (later phases): webhook routes → `webhook_events` (dedupe) → `CrmProvider`
-interface → Mock or HighLevel provider, appointment booking, ops/reporting screens.
+Planned (later phases): webhook routes → `webhook_events` (dedupe) → reuse the intake/CRM
+services above, appointment booking, ops/reporting screens.
 
 ### Folder map
 
 ```
 src/
-  app/(app)/…            pages (Dashboard, Contacts, Lead details, Pipeline, Automations, …)
+  app/(app)/…            pages (Dashboard, Contacts, Lead details, Pipeline, Automations, Integrations, …)
   app/api/health         liveness + DB check (503 when DB is down)
   components/            sidebar + small UI primitives
   db/schema.ts           full database schema (all phases)
@@ -162,8 +172,8 @@ src/
   server/queries/        read-side data access used by pages
   server/queue/          job queue (enqueue, claim, complete/fail, recovery)
   server/worker/         worker runtime (handler registry, poll loop)
-  server/workflows/      nurture (follow-up) workflow
-  server/integrations/   messaging provider interface + mock implementation
+  server/workflows/      nurture (follow-up) and crm-sync (outbox) workflows
+  server/integrations/   messaging + CRM provider interfaces, mock implementations, real HighLevel client
 scripts/                 migrate / seed / worker / demo CLIs
 drizzle/                 generated SQL migrations (committed)
 tests/                   Vitest unit + DB integration tests

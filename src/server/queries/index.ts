@@ -399,6 +399,30 @@ export async function listIntegrationCalls(limit = 25) {
   return db.select().from(s.integrationCalls).orderBy(desc(s.integrationCalls.createdAt)).limit(limit);
 }
 
+export async function getCrmOverview() {
+  const db = getDb();
+  const [stages, failureMode, contactCounts, opportunityCounts, jobCounts, calls] = await Promise.all([
+    db.select().from(s.pipelineStages).orderBy(asc(s.pipelineStages.position)),
+    db.select().from(s.appSettings).where(eq(s.appSettings.key, "demo.mock_crm_failure_mode")),
+    db.select({ synced: sql<number>`count(*) filter (where ${s.contacts.ghlContactId} is not null)::int`, total: sql<number>`count(*)::int` }).from(s.contacts),
+    db.select({ synced: sql<number>`count(*) filter (where ${s.opportunities.ghlOpportunityId} is not null)::int`, total: sql<number>`count(*)::int` }).from(s.opportunities),
+    db
+      .select({ status: s.jobs.status, n: sql<number>`count(*)::int` })
+      .from(s.jobs)
+      .where(sql`${s.jobs.type} like 'crm.%'`)
+      .groupBy(s.jobs.status),
+    listIntegrationCalls(25),
+  ]);
+  return {
+    stages,
+    failureMode: (failureMode[0]?.value as string | undefined) ?? "off",
+    contacts: contactCounts[0],
+    opportunities: opportunityCounts[0],
+    jobs: Object.fromEntries(jobCounts.map((r) => [r.status, r.n])) as Partial<Record<JobStatus, number>>,
+    calls,
+  };
+}
+
 export async function listTeamAndRules() {
   const db = getDb();
   const [team, rules, wl] = await Promise.all([

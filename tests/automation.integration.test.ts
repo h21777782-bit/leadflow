@@ -117,7 +117,10 @@ describe.skipIf(!hasTestDb)("automation engine (integration)", () => {
     expect(oppCount).toBe(1);
     const [{ n: runCount }] = await db().select({ n: sql<number>`count(*)::int` }).from(workflowRuns).where(eq(workflowRuns.contactId, processed.contactId));
     expect(runCount).toBe(1);
-    const [{ n: jobCount }] = await db().select({ n: sql<number>`count(*)::int` }).from(jobs).where(eq(jobs.contactId, processed.contactId));
+    // Phase 5 also enqueues crm.sync_contact + crm.sync_opportunity outbox jobs (their own
+    // duplicate-safety is covered by tests/crm-integration.test.ts) — scope this check to the
+    // follow-up job specifically, which is this test's actual concern.
+    const [{ n: jobCount }] = await db().select({ n: sql<number>`count(*)::int` }).from(jobs).where(and(eq(jobs.contactId, processed.contactId), eq(jobs.type, FOLLOWUP_JOB)));
     expect(jobCount).toBe(1);
   });
 

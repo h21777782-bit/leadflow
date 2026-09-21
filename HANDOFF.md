@@ -3,8 +3,8 @@
 Exact state of LeadFlow at handoff. Any AI assistant or developer continuing this
 project should read this file, then `IMPLEMENTATION_LOG.md`.
 
-**Updated 2026-09-22:** Phase 4 is now complete (was "core built, UI/tests/demos/docs not done"
-as of 2026-09-21 — see git history / `IMPLEMENTATION_LOG.md` for what changed in this pass).
+**Updated 2026-09-22:** Phases 4 and 5 are now complete (Phase 4 was "core built,
+UI/tests/demos/docs not done"; Phase 5 was not started — see `IMPLEMENTATION_LOG.md` for both).
 
 ## Phase status
 
@@ -13,8 +13,8 @@ as of 2026-09-21 — see git history / `IMPLEMENTATION_LOG.md` for what changed 
 | 1 Foundation, DB, seed, read-only UI | ✅ complete, committed |
 | 2 Contacts, duplicates, opportunities, stage changes, audit | ✅ complete, committed |
 | 3 Lead scoring + smart routing | ✅ complete, committed |
-| **4 Automation engine, follow-ups, retries** | ✅ **complete** — engine, UI, 26 integration tests, 3 demo scripts, docs |
-| 5 HighLevel integration | ⏳ not started |
+| 4 Automation engine, follow-ups, retries | ✅ **complete** — engine, UI, 26 integration tests, 3 demo scripts, docs |
+| **5 HighLevel integration** | ✅ **complete** — CrmProvider (mock + real), outbox sync, 11 integration tests, demo script, docs |
 | 6 Webhooks + n8n | ⏳ not started |
 | 7 Appointment booking | ⏳ not started |
 | 8 Ops screens, reporting, demo page, auth | ⏳ not started |
@@ -22,15 +22,22 @@ as of 2026-09-21 — see git history / `IMPLEMENTATION_LOG.md` for what changed 
 
 ## Verified at handoff (actually run)
 
-- `npm run verify` → typecheck ✓, lint 0 warnings ✓, **158 tests passed (12 files)**, production build ✓
-  (132 carried over from the earlier core-engine pass + 26 new automation-engine integration tests).
+- `npm run verify` → typecheck ✓, lint 0 warnings ✓, **169 tests passed (13 files)**, production build ✓
+  (158 carried over from Phase 4 + 11 new CRM integration tests).
 - Migration `0002_automation_engine.sql` applied on a **copy of real data**: old job statuses were
   renamed in place (`dead`→`failed`, `retrying`→`retry_scheduled`, `running`→`processing`,
-  `succeeded`→`completed`), no rows lost. Drizzle reports no schema drift.
-- `npm run demo:a`, `npm run demo:b`, `npm run demo:c` all run to completion against the dev DB.
-- Real two-process test: production web server + a separate `npm run worker` process, a lead created
-  through a genuine HTTP POST to the web server, completed by the *other* process, visible on the
-  dashboard the web process serves. Full write-up in `IMPLEMENTATION_LOG.md`, Phase 4.
+  `succeeded`→`completed`), no rows lost. Drizzle reports no schema drift. **No new migration was
+  needed for Phase 5** — `ghl_contact_id`, `ghl_opportunity_id`, `ghl_stage_id` and `integration_calls`
+  were already in the Phase 1 schema, anticipating this phase.
+- `npm run demo:a`, `npm run demo:b`, `npm run demo:c`, `npm run demo:crm` all run to completion
+  against the dev DB.
+- Real two-process test (Phase 4): production web server + a separate `npm run worker` process, a lead
+  created through a genuine HTTP POST to the web server, completed by the *other* process, visible on
+  the dashboard the web process serves. Full write-up in `IMPLEMENTATION_LOG.md`, Phase 4.
+- HighLevel API v2 docs checked directly against `marketplace.gohighlevel.com` before writing Phase 5
+  code (not third-party blogs, some of which repeat stale claims) — every endpoint URL and date checked
+  is in `IMPLEMENTATION_LOG.md`, Phase 5. No real HighLevel account was used — `MOCK_MODE=true` by
+  default, and the live path is UNVERIFIED against a real account (see that section's honest caveats).
 
 ## Phase 4 — what exists
 
@@ -56,12 +63,25 @@ as of 2026-09-21 — see git history / `IMPLEMENTATION_LOG.md` for what changed 
 6. ✅ Web + separate worker process integration test — see `IMPLEMENTATION_LOG.md`, Phase 4
 7. ✅ Docs for Phase 4 — `LEARNING_GUIDE.md`, `INTERVIEW_GUIDE.md`, `DEMO_COMMANDS.md`, `.env.example`, `README.md`
 
+## Phase 5 — what exists
+
+| File | What it does |
+|---|---|
+| `src/server/integrations/crm/types.ts` | `CrmProvider` interface (`upsertContact`, `upsertOpportunity`, `updateOpportunityStatus`, `getPipelines`) |
+| `src/server/integrations/crm/mock-provider.ts`, `highlevel-provider.ts`, `http-client.ts`, `index.ts` | Mock (with fault injection) + real HTTP implementations, switched by `MOCK_MODE`, same pattern as Phase 4's messaging provider |
+| `src/server/workflows/crm-sync.ts` | Outbox handlers: `crm.sync_contact`, `crm.sync_opportunity`, `crm.update_opportunity` (idempotent — stores and reuses `ghl_*_id`) |
+| `src/app/(app)/integrations/page.tsx` (rewritten), `src/app/actions/integrations.ts`, `src/components/integrations/controls.tsx` | Test connection, sync status, demo failure switch, editable pipeline stage mapping |
+| `scripts/demo-crm.ts` (`npm run demo:crm`), `tests/crm-integration.test.ts` (11 tests) | Demo + mocked-fetch/idempotency tests |
+
 ## Known limitations carried over
 
 - No authentication (actions attributed to demo admin).
 - No-JavaScript form fallback hangs for forms that stay on the page after saving (JS path works).
 - Nothing was tested in a real browser (sandbox had none).
 - `next.config.ts` allows server actions from `*.app.github.dev` (Codespaces) — **not tested in Codespaces yet**.
+- The real `HighLevelProvider` (Phase 5) has never made a request against a live HighLevel account —
+  only against a mocked `fetch` in tests. If real credentials are supplied, run `npm run demo:crm`-style
+  verification against them once (with `MOCK_MODE=false`) before relying on it live.
 
 ## How to run
 
