@@ -545,3 +545,118 @@ Default state `MOCK_MODE=true` hai, isliye demo/interview mein asli HighLevel ka
 | Contact abhi tak sync nahi hua | Opportunity sync job transient error deta hai | Automatic retry — jab tak contact sync ho jaaye |
 | Rate limited (429) | `Retry-After` respect hota hai | Automatic retry us delay ke baad |
 | Stage mapping missing | Opportunity phir bhi sync hoti hai, bas stage id `null` jaata hai | Admin `/integrations` pe mapping bhar sakta hai |
+
+---
+
+# Phase 6 — Webhooks + n8n (Hinglish)
+
+## 1. Humne kya banaya — ek line mein
+
+6 endpoints (`/api/webhooks/leads`, `/contacts`, `/opportunities`, `/appointments`, `/payments`,
+`/messages`) jo **bahar se** (website, n8n, HighLevel) events lete hain — koi bhi request pehle
+**authenticate** hoti hai, tabhi kuch bhi database mein save hota hai. Ek n8n workflow bhi banaya aur
+**Docker mein sach mein chalaya** — sirf likha nahi.
+
+## 2. Do signature schemes — kyun alag alag?
+
+File: `src/lib/webhook-signature.ts` (pure — DB ka koi kaam nahi)
+
+- **Website / n8n (hamara apna scheme):** HMAC-SHA256, `timestamp.rawBody` pe. Header:
+  `X-LeadFlow-Timestamp` + `X-LeadFlow-Signature`. Timestamp 5 minute se purana ho to reject — ye
+  **replay attack** se bachata hai (koi purani request record karke dobara na bhej sake).
+- **HighLevel:** Ed25519, sirf raw body pe (timestamp nahi). Header: `X-GHL-Signature`, base64 mein.
+  Public key HighLevel ke docs mein **fixed** hai — kahin se fetch nahi karna padta, code mein hi
+  default hai. Har cheez apply karne se pehle asli docs check kiye (2026-09-22) — kai blogs galat
+  bata rahe the ki "upsert endpoint hai hi nahi" jab ki hai.
+
+**Dono mein common:** signature check **DATABASE CHHUNE SE PEHLE** hota hai. Agar signature galat hai,
+to `webhook_events` table mein ek row bhi nahi banti — koi bhi unauthenticated request ka trace tak
+nahi bachta.
+
+## 3. Fast acknowledge + job queue (outbox jaisa, par inbound)
+
+```
+Request aata hai
+  → signature verify (galat ho to yahin 401, kuch save nahi hota)
+  → JSON parse + basic shape check (400/422)
+  → eventId nikalo (body ka eventId, ya HighLevel ka webhookId, ya header)
+  → "leads" hai? → seedha ingestLeadEvent() call karo (wo already fast + idempotent hai)
+  → baaki 5 types? → webhook_events mein ek row (UNIQUE source+eventId) + "webhook.process" job → 202 turant
+  → worker job uthata hai → asli kaam (contact update, stage change, payment, etc.) karta hai
+```
+
+**Kyun "leads" alag hai:** `ingestLeadEvent` (Phase 4) khud hi apna `webhook_events` row banata hai. Agar
+generic receiver BHI pehle ek row bana de, to `ingestLeadEvent` ka apna insert hamesha "already exists"
+dekhega — pehli hi asli request "duplicate" dikhegi! Isliye leads seedha `ingestLeadEvent` ko call karta
+hai, baaki 5 types generic queue wale raaste se jaate hain.
+
+## 4. Payment → Won — real business logic
+
+File: `src/server/services/payments.ts`
+
+```
+Payment webhook aaya
+  → externalPaymentId se idempotent check (UNIQUE index) — dobara aaye to kuch nahi hota
+  → deal ko "won" karo (wahi changeStage() jo Kanban board use karta hai)
+  → onboarding checklist banao (4 tasks) — sirf agar pehle se nahi hai
+  → audit log
+```
+
+Idempotency yahan **do jagah** hai: (1) `webhook_events` table — same webhook event dobara na chale,
+(2) `payments.external_payment_id` — chahe kisi aur route se (retry, ya alag event) yehi payment
+dobara aaye, deal dobara won nahi hoga aur checklist dobara nahi banegi.
+
+## 5. Ek bug jo sirf test se pakda (hand-testing se nahi)
+
+`processContacts` handler sirf email/phone se contact dhoondhta tha — agar payload mein seedha
+`contactId` diya ho (jo real-world mein sabse common case hai, e.g. "is contact ka company field
+update karo"), to wo IGNORE ho jaata tha aur naya contact banane ki koshish hoti, jisme `firstName`
+missing hone se fail ho jaata. **"Replayed event returns the same result" test ne ye pakda** — maine
+pehle manually test kiya tha jisme main hamesha email/phone bhej raha tha, isliye ye case chhoot gaya
+tha. Fix: `contactId` seedha check karo pehle, phir existing contact ke values se missing fields bharo.
+
+## 6. n8n — asli Docker mein chalaya, sirf JSON nahi likha
+
+`docker pull n8nio/n8n` → import → activate → **real webhook URL pe curl** → asli LeadFlow server tak
+pahuncha. Is process mein **4 real bugs** mile aur fix kiye:
+
+1. `Module 'crypto' is disallowed` — n8n apne Code node mein Node ke built-in modules block karta hai
+   by default. Fix: `NODE_FUNCTION_ALLOW_BUILTIN=crypto` env var.
+2. `access to env vars denied` — `$env.WEBHOOK_SIGNING_SECRET` access karne ke liye
+   `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` chahiye.
+3. **Sabse important bug:** HTTP Request node mein maine `specifyBody: "raw"` likha tha — galat! Sahi
+   parameter `contentType: "raw"` hai. Isse n8n **khaali body** bhej raha tha, lekin signature header
+   (jo Code node ne sahi body se banaya tha) sahi hi bheja — matlab LeadFlow ko ek signature milta jo
+   ek ALAG (empty) body se match nahi karta tha. Error sirf "signature does not match" bola, "body
+   khaali hai" nahi bataya — n8n ka execution log (REST API se, authentication karke) dekh kar hi pata
+   chala.
+4. Set nodes ("Notify success/failure") default mein sirf apna naya field rakhte hain, baaki sab
+   fields drop kar dete hain — `includeOtherFields: true` set karna pada.
+
+**Interview mein kaam ki baat:** *"Maine sirf workflow JSON likh kar chhoda nahi — actually Docker mein
+n8n chala kar, real webhook trigger karke, real bugs fix kiye. Isse pata chalta hai ki main sirf
+'documentation ke hisaab se sahi lagta hai' pe nahi rukta, cheezein chala kar dekhta hoon."*
+
+## 7. Important files (Phase 6)
+
+| File | Kaam |
+|---|---|
+| `src/lib/webhook-signature.ts` | HMAC + Ed25519 verification (pure, 13 tests) |
+| `src/server/http/webhook-route.ts` | Sabhi 6 routes ka shared logic |
+| `src/server/services/webhooks.ts` | Idempotent claim + job enqueue |
+| `src/server/workflows/webhook-process.ts` | Job handler — resource type ke hisaab se dispatch |
+| `src/server/services/payments.ts`, `appointments.ts`, `notifications.ts` | Payment→Won, appointment upsert, SIMULATED notification |
+| `src/app/(app)/webhooks/page.tsx` | Webhook Events screen + Reprocess button |
+| `scripts/webhook-send.ts` | Signed test sender |
+| `n8n/leadflow-lead-intake.json` | Importable n8n workflow |
+| `tests/webhook-signature.test.ts`, `webhooks-integration.test.ts` | 26 tests |
+
+## 8. Kya fail ho sakta hai
+
+| Failure | Kaise pata chalta hai | Recovery |
+|---|---|---|
+| Galat/purani signature | 401, `/webhooks` pe kabhi row hi nahi banti | Sender apna secret/clock theek kare |
+| Same event dobara aaye | `webhook_events` UNIQUE constraint | Original result hi wapas milta hai, kuch dobara nahi hota |
+| Payload mein zaroori field missing | Job "failed", clear error message | Person `/webhooks` pe dekh kar payload fix kare, phir Reprocess |
+| Contact resolve nahi hua (email/phone match nahi) | "No contact found matching..." | Sahi identifier bhejo, ya pehle contact banao |
+| Worker down | Jobs "pending" rehte hain, kabhi lose nahi hote | Worker start karo, sab process ho jaayega |

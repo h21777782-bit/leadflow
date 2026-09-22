@@ -11,6 +11,7 @@ import {
   PlugZap,
   Settings,
   Users,
+  Webhook,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
@@ -39,6 +40,7 @@ const NAV: { heading: string; items: NavItem[] }[] = [
     heading: "System",
     items: [
       { href: "/integrations", label: "Integrations", icon: PlugZap },
+      { href: "/webhooks", label: "Webhook events", icon: Webhook },
       { href: "/settings", label: "Settings", icon: Settings },
     ],
   },

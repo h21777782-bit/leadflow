@@ -297,7 +297,97 @@ npx vitest run tests/crm-integration.test.ts   # 11 tests: mocked-fetch HTTP beh
 Point at: *never logs the bearer token*, *idempotent re-sync: an opportunity is created once … then
 updated in place on every later sync*, and *the seeded HighLevel failure jobs … are now retryable*.
 
-## 12. Reset before an interview
+## 12. Phase 6 — webhooks + n8n
+
+> Every request is authenticated before anything is stored: HMAC-SHA256 for website/n8n,
+> Ed25519 (`X-GHL-Signature`) for HighLevel. `WEBHOOK_SIGNING_SECRET` must be set in `.env.local`
+> (`openssl rand -hex 32`) for the HMAC path — the Ed25519 path works out of the box (HighLevel's
+> public key is a fixed default, no configuration needed).
+
+### 12a. Send a signed test event (no n8n needed)
+
+```bash
+npm run dev                              # terminal 1
+npm run webhook:send -- leads             # terminal 2 — real HMAC-signed lead intake
+npm run webhook:send -- leads --bad-signature   # expect 401
+npm run webhook:send -- leads --expired          # expect 401 (stale timestamp, replay protection)
+```
+
+Prints the exact `curl` equivalent too — useful for pasting into a terminal live.
+
+### 12b. The other five resource types (queued — needs the worker running)
+
+```bash
+npm run worker                            # terminal 2, if not already running
+```
+
+`contacts`, `opportunities`, `appointments`, `payments` and `messages` all return `202` immediately
+and are processed by the worker. `opportunities` and `payments` need a real `opportunityId` in their
+payload (edit `scripts/webhook-send.ts`'s `samplePayload()` or copy an id from `/contacts`) — sending
+one without a resolvable id/email/contact is itself a good demo of the clear error path
+(`/webhooks` will show a `failed` row with the exact reason).
+
+### 12c. In the browser
+
+| Page | What to point out |
+|---|---|
+| `/webhooks` | Every received event: source, signature result, status, result/error, the linked job's attempt count, expandable raw payload, and a **Reprocess** button on failed events. |
+| A lead's page after `webhook:send -- messages` | The reply appears in the timeline; if the lead has an owner, check `/webhooks` → the `messages` event's result, and the owner's notification (SIMULATED, in-app only — no table for it yet in the UI, visible via `select * from notifications` or the audit log's `notification.sent` entries on the lead's activity timeline). |
+
+### 12d. Payment → Won, end to end
+
+```bash
+npm run webhook:send -- payments   # after editing OPP_ID in the sample payload, or via curl with a real id
+```
+
+Then check the lead's page: stage **Won**, and four onboarding tasks appear (same checklist the
+Phase 1 seed data uses for won deals) — created exactly once even if the same `externalPaymentId`
+is delivered again.
+
+### 12e. n8n — actually run it, not just import it
+
+Requires Docker.
+
+```bash
+docker pull n8nio/n8n:latest
+docker run -d --name leadflow-n8n -p 5678:5678 \
+  -e N8N_SECURE_COOKIE=false \
+  -e WEBHOOK_SIGNING_SECRET=<same value as .env.local> \
+  -e LEADFLOW_BASE_URL=http://host.docker.internal:3000 \
+  -e NODE_FUNCTION_ALLOW_BUILTIN=crypto \
+  -e N8N_BLOCK_ENV_ACCESS_IN_NODE=false \
+  n8nio/n8n:latest
+
+docker cp n8n/leadflow-lead-intake.json leadflow-n8n:/tmp/leadflow-lead-intake.json
+docker exec leadflow-n8n n8n import:workflow --input=/tmp/leadflow-lead-intake.json
+docker exec leadflow-n8n n8n publish:workflow --id=leadflow-lead-intake
+docker restart leadflow-n8n     # required for a freshly published workflow's webhook to register
+
+# Once n8n logs "Activated workflow ... (ID: leadflow-lead-intake)":
+curl -i -X POST http://localhost:5678/webhook/leadflow-lead \
+  -H 'Content-Type: application/json' \
+  -d '{"firstName":"N8N","lastName":"Test","email":"n8n-demo@automation.example","leadSource":"website_form"}'
+```
+
+The two `NODE_FUNCTION_ALLOW_BUILTIN` / `N8N_BLOCK_ENV_ACCESS_IN_NODE` env vars are required for
+this specific workflow (it uses Node's `crypto` module and reads `$env` inside n8n) — without them
+n8n throws `Module 'crypto' is disallowed` / `access to env vars denied`. Point at the response:
+`{"status":"accepted","leadflow":{...,"created":true},"notification":"[SIMULATED] Lead accepted: ..."}`.
+Send an incomplete payload (no `leadSource`) to see the failure branch:
+`{"status":"rejected",...,"notification":"[SIMULATED] Lead REJECTED (HTTP 400): ..."}`.
+
+```bash
+docker rm -f leadflow-n8n   # tear down when done — it's a demo tool, not part of the dev stack
+```
+
+### 12f. Tests
+
+```bash
+npx vitest run tests/webhook-signature.test.ts      # 13 pure tests: valid/tampered/expired, both schemes
+npx vitest run tests/webhooks-integration.test.ts   # 13 real-Postgres tests: duplicate delivery, payment→won, reprocess
+```
+
+## 13. Reset before an interview
 
 ```bash
 npm run db:seed        # restores the exact demo dataset

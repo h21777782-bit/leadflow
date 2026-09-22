@@ -6,7 +6,7 @@
 
 The full project walkthrough (2-minute and 5-minute versions) will be added in Phase 9.
 This file currently covers **Phase 3: scoring and routing**, **Phase 4: the automation engine**,
-and **Phase 5: the HighLevel integration layer**.
+**Phase 5: the HighLevel integration layer**, and **Phase 6: webhooks and n8n**.
 
 ---
 
@@ -162,3 +162,48 @@ Idempotency here means something specific: HighLevel's contact and opportunity i
 5. **`/failed-automations`** → the seeded `crm.sync_contact` failure (from Phase 1's seed data) now has a working **Retry Now** button, where it previously said "no handler exists yet".
 6. Terminal: `npm run demo:crm` → narrate the outage → retry → recovery → audit trail as it prints.
 7. Terminal: `npx vitest run tests/crm-integration.test.ts` → point at the idempotent re-sync tests and the "never logs the bearer token" test.
+
+---
+
+## Phase 6: webhooks and n8n — 2-minute explanation (say this)
+
+"LeadFlow accepts inbound events from three kinds of external systems — the website, n8n workflows, and HighLevel — through six webhook endpoints. Every request is authenticated before anything touches the database: our own website/n8n traffic is signed with HMAC-SHA256 over a timestamp and the raw body, with a 5-minute replay window, and HighLevel's traffic is verified with Ed25519, the scheme they moved to this year. If the signature doesn't check out, nothing is even written — not a 'received' row, nothing — so the audit trail only ever shows real, authenticated deliveries.
+
+Once authenticated, most endpoints acknowledge in under a millisecond with a 202 and hand the real work to the same job queue the follow-up engine already uses — the endpoint just claims the event idempotently and enqueues a job. The two exceptions are the lead-intake endpoint, which reuses an already-idempotent service synchronously because it's fast enough not to need queueing, and everything else, which processes in the background. A payment webhook, for instance, marks the deal Won and creates the onboarding checklist — idempotently, so the same payment delivered twice, which happens in the real world, never double-processes.
+
+The part I'm proudest of: I didn't just write the importable n8n workflow JSON and call it done. I pulled n8n, ran it in Docker, imported the workflow, activated it, and triggered its real webhook URL with curl against my actual running app. That surfaced four real configuration and workflow bugs — including one where I'd used the wrong parameter name on the HTTP Request node, which silently sent an empty body while still attaching a valid-looking signature header computed from the real payload. I only found it by pulling n8n's own node-type schema and diffing it against what I'd written. That's the difference between 'this should work' and 'I watched it work.'"
+
+---
+
+## Webhooks — technical questions with accurate answers
+
+**1. Why verify the signature before writing anything to the database, not after?**
+> Because writing first and validating second means an unauthenticated caller can still cause a database write and consume the idempotency key for a real event — even if I later marked that row as invalid, the row would exist, and it costs a write and a place in the audit log for something nobody should have been able to send. Verifying strictly before any query means an attacker or a broken client leaves literally no trace beyond a web server access log.
+
+**2. Why does the website/n8n scheme sign a timestamp and HighLevel's doesn't?**
+> That's HighLevel's own scheme, not mine — their Delivery URL signature is just over the raw body, no timestamp, so I implement it exactly as documented rather than inventing a variant. For my own scheme I added a timestamp specifically for replay protection: a signature alone proves the sender knew the secret at some point, not that the request is fresh. Binding the signature to a timestamp and rejecting anything more than 5 minutes old means a captured, replayed request is rejected even though its signature is technically valid.
+
+**3. How do you guarantee the same webhook delivered twice — which happens constantly with real providers' at-least-once delivery — doesn't double-process?**
+> Two independent idempotency layers, deliberately. First, `webhook_events` has a UNIQUE constraint on `(source, event_id)` — the insert either claims the event or, on conflict, returns the row that already exists, including its stored result if it already finished, so a duplicate HTTP delivery gets the exact same response as the original. Second, for anything money-related — payments specifically — there's a second, independent UNIQUE constraint on the payment's own external id, so even if two *different* webhook events somehow both refer to the same payment, it's still only ever recorded and processed once.
+
+**4. Walk me through the real n8n bug — what exactly went wrong and how did you find it?**
+> The HTTP Request node needs a specific combination of parameters to send a raw string body: `contentType: "raw"`, not `specifyBody: "raw"` — that second field only exists at all when content type is JSON, and only accepts `"keypair"` or `"json"` as values. I'd used the wrong one, which n8n accepted without any import error, but at runtime it meant no body was ever attached to the request — while the signature header, computed correctly from the real payload in an earlier Code node, was still sent. So LeadFlow received an empty body with a signature that was valid for a *different*, non-empty body, and correctly rejected it with "signature does not match" — a true, correct rejection that gave me no hint the actual bug was an empty body. I found it by authenticating to n8n's own REST API, pulling its node-type schema (`/types/nodes.json`), and diffing the real parameter names against what I'd written.
+
+**5. What's still unverified, and why is that an honest thing to say rather than a gap to hide?**
+> The Ed25519 signature verification itself is real and matches HighLevel's current published scheme and key — that part would work against a genuine HighLevel delivery with zero configuration. What's not verified is the actual payload shape: real HighLevel webhooks carry their own event envelope (`ContactCreate`, `ContactUpdate`, etc. with a nested `data` object), and I didn't build a mapping layer from that shape into LeadFlow's internal fields, because nothing in the requirements asked for it and building one speculatively would be exactly the kind of invented, unverified endpoint the brief told me not to write. I documented that boundary explicitly instead of implying more coverage than exists.
+
+**Likely follow-ups**
+- *"Why does `/api/webhooks/leads` behave differently from the other five?"* → It calls `ingestLeadEvent` (built in Phase 4) directly and synchronously instead of going through the generic queued receiver, because that service already owns its own idempotent `webhook_events` handling. Layering the generic receiver's own claim on top of it would insert into the same table twice for the same key — the second insert, inside `ingestLeadEvent`, would always find the row the generic receiver already claimed and report every genuine first delivery as a duplicate. I found this by reasoning through the design before writing code, not by hitting the bug.
+- *"What HTTP status codes does it return and why?"* → 202 on acceptance (work may still be in flight), 401 for a missing or invalid signature, 400 for malformed JSON or missing required fields, 413 for an oversized body, 422 for a well-formed request that's missing what's needed for idempotency (no event id) or is otherwise semantically unprocessable.
+- *"Could someone replay a HighLevel webhook since it doesn't have a timestamp?"* → Not usefully — signature validity plus the event-id UNIQUE constraint means a replayed HighLevel event is accepted as *authentic* (it was) but treated as a duplicate and returns the original stored result rather than reprocessing. HighLevel's own docs don't specify timestamp-based replay protection for this scheme, so I implemented exactly what they document rather than adding an unrequested variant.
+
+---
+
+## Step-by-step live demo — Phase 6 (≈3 minutes)
+
+1. **`/webhooks`** → point at the columns: source, signature result, status, result/error, the linked job's attempts, expandable raw payload.
+2. Terminal: `npm run webhook:send -- leads` → real HMAC-signed request → point at the printed `curl` equivalent and the 202 response with the new contact/opportunity ids.
+3. Terminal: `npm run webhook:send -- leads --bad-signature` and `--expired` → both 401, for different reasons — point at the exact error message for each.
+4. `npm run webhook:send -- payments` (after putting a real opportunity id in) → open that lead's page → stage **Won**, onboarding checklist created.
+5. If time allows: the n8n Docker demo from `DEMO_COMMANDS.md` §12e — genuinely trigger the real webhook URL and show both the success and failure branch responses.
+6. Terminal: `npx vitest run tests/webhooks-integration.test.ts` → point at *concurrent duplicates: 5 simultaneous deliveries … create exactly one row and one job* and *payment → won: … idempotent on externalPaymentId*.

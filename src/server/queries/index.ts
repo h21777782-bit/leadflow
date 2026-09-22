@@ -399,6 +399,16 @@ export async function listIntegrationCalls(limit = 25) {
   return db.select().from(s.integrationCalls).orderBy(desc(s.integrationCalls.createdAt)).limit(limit);
 }
 
+// ── Webhook events (Phase 6) ─────────────────────────────────────────────────
+export async function listWebhookEvents(limit = 100) {
+  const db = getDb();
+  const rows = await db.select().from(s.webhookEvents).orderBy(desc(s.webhookEvents.receivedAt)).limit(limit);
+  const jobIds = rows.map((r) => r.jobId).filter((id): id is string => Boolean(id));
+  const jobs = jobIds.length ? await db.select().from(s.jobs).where(inArray(s.jobs.id, jobIds)) : [];
+  const jobById = new Map(jobs.map((j) => [j.id, j]));
+  return rows.map((r) => ({ ...r, job: r.jobId ? (jobById.get(r.jobId) ?? null) : null }));
+}
+
 export async function getCrmOverview() {
   const db = getDb();
   const [stages, failureMode, contactCounts, opportunityCounts, jobCounts, calls] = await Promise.all([

@@ -23,7 +23,8 @@
     "demo:c": "tsx scripts/demo-c.ts",
     "demo:crm": "tsx scripts/demo-crm.ts",
     "worker": "tsx scripts/worker.ts",
-    "worker:once": "tsx scripts/worker.ts --once"
+    "worker:once": "tsx scripts/worker.ts --once",
+    "webhook:send": "tsx scripts/webhook-send.ts"
   },
   "dependencies": {
     "@fontsource/ibm-plex-sans": "^5.3.0",

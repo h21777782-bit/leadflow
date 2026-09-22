@@ -3,8 +3,8 @@
 Exact state of LeadFlow at handoff. Any AI assistant or developer continuing this
 project should read this file, then `IMPLEMENTATION_LOG.md`.
 
-**Updated 2026-09-22:** Phases 4 and 5 are now complete (Phase 4 was "core built,
-UI/tests/demos/docs not done"; Phase 5 was not started — see `IMPLEMENTATION_LOG.md` for both).
+**Updated 2026-09-23:** Phase 6 is now complete (webhooks + n8n). Phases 4 and 5 were completed
+2026-09-22 — see `IMPLEMENTATION_LOG.md` for all three.
 
 ## Phase status
 
@@ -14,30 +14,34 @@ UI/tests/demos/docs not done"; Phase 5 was not started — see `IMPLEMENTATION_L
 | 2 Contacts, duplicates, opportunities, stage changes, audit | ✅ complete, committed |
 | 3 Lead scoring + smart routing | ✅ complete, committed |
 | 4 Automation engine, follow-ups, retries | ✅ **complete** — engine, UI, 26 integration tests, 3 demo scripts, docs |
-| **5 HighLevel integration** | ✅ **complete** — CrmProvider (mock + real), outbox sync, 11 integration tests, demo script, docs |
-| 6 Webhooks + n8n | ⏳ not started |
-| 7 Appointment booking | ⏳ not started |
+| 5 HighLevel integration | ✅ **complete** — CrmProvider (mock + real), outbox sync, 11 integration tests, demo script, docs |
+| **6 Webhooks + n8n** | ✅ **complete** — 6 signed endpoints, Webhook Events UI, n8n workflow actually run in Docker, 26 tests, docs |
+| 7 Appointment booking | ⏳ not started (Phase 6 built a minimal webhook-driven appointment upsert only — no availability/reminders/reschedule) |
 | 8 Ops screens, reporting, demo page, auth | ⏳ not started |
 | 9 Final docs, FAILURE_STORY, deployment guide | ⏳ not started |
 
 ## Verified at handoff (actually run)
 
-- `npm run verify` → typecheck ✓, lint 0 warnings ✓, **169 tests passed (13 files)**, production build ✓
-  (158 carried over from Phase 4 + 11 new CRM integration tests).
-- Migration `0002_automation_engine.sql` applied on a **copy of real data**: old job statuses were
-  renamed in place (`dead`→`failed`, `retrying`→`retry_scheduled`, `running`→`processing`,
-  `succeeded`→`completed`), no rows lost. Drizzle reports no schema drift. **No new migration was
-  needed for Phase 5** — `ghl_contact_id`, `ghl_opportunity_id`, `ghl_stage_id` and `integration_calls`
-  were already in the Phase 1 schema, anticipating this phase.
+- `npm run verify` → typecheck ✓, lint 0 warnings ✓, **195 tests passed (15 files)**, production build ✓
+  (169 carried over from Phase 5 + 13 webhook-signature + 13 webhooks-integration tests).
+- Migration `0002_automation_engine.sql` applied on a **copy of real data** (Phase 4 detail — old job
+  statuses renamed in place, no rows lost). Migration `0003_webhooks_n8n.sql` (Phase 6) is purely
+  additive (new `notifications` table + `webhook_events.job_id`) — no data migration needed.
 - `npm run demo:a`, `npm run demo:b`, `npm run demo:c`, `npm run demo:crm` all run to completion
   against the dev DB.
 - Real two-process test (Phase 4): production web server + a separate `npm run worker` process, a lead
   created through a genuine HTTP POST to the web server, completed by the *other* process, visible on
   the dashboard the web process serves. Full write-up in `IMPLEMENTATION_LOG.md`, Phase 4.
 - HighLevel API v2 docs checked directly against `marketplace.gohighlevel.com` before writing Phase 5
-  code (not third-party blogs, some of which repeat stale claims) — every endpoint URL and date checked
-  is in `IMPLEMENTATION_LOG.md`, Phase 5. No real HighLevel account was used — `MOCK_MODE=true` by
-  default, and the live path is UNVERIFIED against a real account (see that section's honest caveats).
+  and Phase 6 code (not third-party blogs, some of which repeat stale claims) — every endpoint URL and
+  date checked is in `IMPLEMENTATION_LOG.md`. No real HighLevel account was used for the outbound sync
+  (Phase 5) — `MOCK_MODE=true` by default, live path UNVERIFIED against a real account. The inbound
+  Ed25519 webhook signature scheme (Phase 6) *is* HighLevel's real, current, fixed public key — that
+  part works against a real HighLevel delivery without any configuration.
+- **n8n was actually pulled, run in Docker, imported, activated, and triggered** against the real dev
+  server — not just written. Found and fixed 4 real bugs in the process (wrong n8n HTTP node
+  parameter, env/module sandboxing, a Set node dropping fields) — see `IMPLEMENTATION_LOG.md`, Phase 6.
+  The container was removed after verification; it's not part of the ongoing dev setup.
 
 ## Phase 4 — what exists
 
@@ -73,6 +77,19 @@ UI/tests/demos/docs not done"; Phase 5 was not started — see `IMPLEMENTATION_L
 | `src/app/(app)/integrations/page.tsx` (rewritten), `src/app/actions/integrations.ts`, `src/components/integrations/controls.tsx` | Test connection, sync status, demo failure switch, editable pipeline stage mapping |
 | `scripts/demo-crm.ts` (`npm run demo:crm`), `tests/crm-integration.test.ts` (11 tests) | Demo + mocked-fetch/idempotency tests |
 
+## Phase 6 — what exists
+
+| File | What it does |
+|---|---|
+| `src/lib/webhook-signature.ts` | HMAC-SHA256 (website/n8n, 5-min replay window) + Ed25519 `X-GHL-Signature` (HighLevel, fixed published key) verification — pure, 13 unit tests |
+| `src/server/http/webhook-route.ts` | Shared handler behind all 6 routes: size limit → signature (before any DB write) → parse → idempotency key → dispatch |
+| `src/app/api/webhooks/{leads,contacts,opportunities,appointments,payments,messages}/route.ts` | Six one-line routes |
+| `src/server/services/webhooks.ts`, `src/server/workflows/webhook-process.ts` | Idempotent receive + enqueue (`webhook_events` UNIQUE(source,event_id)), and the `webhook.process` job that dispatches to existing services (contacts/opportunities/messages) or two new ones (payments, appointments) |
+| `src/server/services/payments.ts`, `appointments.ts`, `notifications.ts` | Payment → Won + onboarding checklist (idempotent on `externalPaymentId`); minimal webhook-driven appointment upsert; SIMULATED rep notification on reply |
+| `src/app/(app)/webhooks/page.tsx` + actions/components | Webhook Events screen: payload, signature result, status, result/error, linked job, Reprocess button |
+| `scripts/webhook-send.ts` (`npm run webhook:send`), `n8n/leadflow-lead-intake.json` | Signed test sender + curl examples; n8n workflow **actually run** in Docker (see IMPLEMENTATION_LOG.md for the 4 real bugs found and fixed) |
+| `tests/webhook-signature.test.ts` (13), `tests/webhooks-integration.test.ts` (13) | Signature edge cases; duplicate/concurrent delivery, invalid payload, reprocess, payment→won against real Postgres |
+
 ## Known limitations carried over
 
 - No authentication (actions attributed to demo admin).
@@ -82,6 +99,12 @@ UI/tests/demos/docs not done"; Phase 5 was not started — see `IMPLEMENTATION_L
 - The real `HighLevelProvider` (Phase 5) has never made a request against a live HighLevel account —
   only against a mocked `fetch` in tests. If real credentials are supplied, run `npm run demo:crm`-style
   verification against them once (with `MOCK_MODE=false`) before relying on it live.
+- Phase 6's webhook endpoints expect **our own canonical payload shape** for the business data
+  regardless of which signature scheme authenticated the request — a real HighLevel webhook's native
+  `data` envelope (`ContactCreate`/`ContactUpdate`/etc. field names) is not mapped into it. Only the
+  `X-GHL-Signature` verification itself was checked against real HighLevel docs and a real key format.
+- The appointments webhook does a minimal upsert only — no availability checking, double-booking
+  prevention, reminders, or reschedule/cancel flows. That's Phase 7.
 
 ## How to run
 

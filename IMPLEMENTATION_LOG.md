@@ -5,6 +5,131 @@ Newest phase at the top.
 
 ---
 
+## Phase 6 — Webhooks + n8n ✅
+
+### Official docs checked before writing any code (2026-09-22)
+
+The finishing prompt specifically called out checking HighLevel's signature scheme before
+implementing it — done, same standard as Phase 5.
+
+| What | URL | Finding |
+|---|---|---|
+| Webhook signing | `marketplace.gohighlevel.com/docs/webhook/WebhookIntegrationGuide/` and `.../webhook/ProviderOutboundMessage/` | `X-GHL-Signature` (Ed25519) is signed over the **raw JSON body only** (no timestamp, unlike our own scheme) and is **base64**-encoded. The Ed25519 **public key is fixed and published** in the docs (not fetched per-app) — copied verbatim into `src/lib/webhook-signature.ts` as `HIGHLEVEL_ED25519_PUBLIC_KEY_PEM`, overridable via `HIGHLEVEL_WEBHOOK_PUBLIC_KEY` for tests or a future key rotation. `X-WH-Signature` (RSA) is the deprecated predecessor — HighLevel's own changelog says it was cut off **2026-07-01**, before today's date, so only Ed25519 is implemented. |
+| Payload envelope | Same guide | Real GHL webhooks carry `{ type, timestamp, webhookId, data }`. Only `webhookId` (idempotency key) is relied on here — the `data` shape for real GHL event types (`ContactCreate` etc.) is **not** mapped into our internal fields; every endpoint expects our own canonical field names regardless of which signature scheme authenticated the request. Mapping HighLevel's native payload shapes is future work if Phase 5's outbound sync is ever paired with real inbound HighLevel webhooks — out of scope for what this prompt asked for (verify the signature correctly; don't invent a field-mapping layer that was never requested). |
+
+### What was built
+
+| File | What it does |
+|---|---|
+| `src/lib/webhook-signature.ts` | Pure, DB-free signature verification: HMAC-SHA256 (`X-LeadFlow-Timestamp`/`-Signature`, 5-minute replay window, timing-safe compare) for website/n8n; Ed25519 (`X-GHL-Signature`) for HighLevel. |
+| `src/server/http/webhook-route.ts` | One shared handler behind all 6 routes: raw-body size limit → signature verify (before any DB write) → JSON parse/shape check → idempotency key extraction → dispatch. |
+| `src/app/api/webhooks/{leads,contacts,opportunities,appointments,payments,messages}/route.ts` | Six one-line `POST` handlers, each just naming their resource type. |
+| `src/server/services/webhooks.ts` | `receiveWebhook()` — idempotent claim (`webhook_events` UNIQUE(source, event_id)) + enqueue a `webhook.process` job, 202 fast. `reprocessWebhookEvent()` for the UI's Reprocess button. |
+| `src/server/workflows/webhook-process.ts` | The `webhook.process` job handler — dispatches by resource type, reusing `mergeIntoContact`/`createContact` (contacts), `changeStage` (opportunities), `logInboundReply` (messages), and two new services (below) for appointments/payments. |
+| `src/server/services/payments.ts` | `processPaymentReceived()` — idempotent on `externalPaymentId`, marks the deal Won via the existing `changeStage`, creates the onboarding checklist once. |
+| `src/server/services/appointments.ts` | Minimal webhook-driven appointment upsert (idempotent on `ghlAppointmentId`) — full booking/availability/reminders is Phase 7. |
+| `src/server/services/notifications.ts` | `notifyRepOfReply()` — a new `notifications` table, SIMULATED/in-app only, no real channel. |
+| `drizzle/0003_webhooks_n8n.sql` | New `notifications` table + `webhook_events.job_id` (links an event to the job doing its work, for the Reprocess button and the UI). Purely additive — no data migration needed. |
+| `src/app/(app)/webhooks/page.tsx`, `src/app/actions/webhooks.ts`, `src/components/webhooks/controls.tsx` | Webhook Events screen: payload (expandable), signature result, status, result/error, linked job's attempt count, Reprocess button on failed events. |
+| `scripts/webhook-send.ts` (`npm run webhook:send`) | Signs and sends a real HMAC-signed test event to a running server for any of the 6 resources; also prints the equivalent `curl` command; `--bad-signature` / `--expired` flags demo the 401 paths. |
+| `n8n/leadflow-lead-intake.json` | Importable n8n workflow: Webhook → Code (sign HMAC) → HTTP Request → IF success/fail → Set (SIMULATED notification) → Respond to Webhook. **Actually imported and run against a local n8n in Docker — see below.** |
+| `tests/webhook-signature.test.ts` (13 tests), `tests/webhooks-integration.test.ts` (13 tests) | Pure signature tests (valid/tampered/expired/wrong-key, both schemes) + real-Postgres tests (duplicate delivery, concurrent duplicates, invalid payload, Reprocess, payment → won, both direct-service and full-webhook-path). |
+
+### Architecture decisions worth knowing
+
+- **`leads` bypasses the generic receiver.** `ingestLeadEvent` (Phase 4) already owns its own
+  idempotent `webhook_events` row. If the generic `receiveWebhook()` also inserted into that same
+  table first, `ingestLeadEvent`'s own insert would always collide with the row the generic receiver
+  already claimed — every genuine first delivery would look like a duplicate. So `/api/webhooks/leads`
+  calls `ingestLeadEvent` directly and synchronously; the other five resource types (no existing
+  idempotent service to reuse) go through `receiveWebhook()` + the `webhook.process` job.
+- **Acknowledge fast (202) vs. reuse existing services**, reconciled: `leads` does its work
+  synchronously (it's already fast and already idempotent — no queueing needed), the other five queue
+  a job and return 202 immediately, then the job does the actual work asynchronously.
+- **Signature verified before any database write, ever** — not even a "received" row for an
+  unauthenticated request. This also means `webhook_events` (and the Webhook Events screen) only ever
+  shows real, authenticated deliveries, not noise from scanners hitting the endpoint.
+
+### Errors encountered and fixes
+
+1. **`processContacts` ignored `payload.contactId` entirely** and always went through an email/phone
+   lookup, which is empty for a payload that only carries an id + a field to patch (e.g.
+   `{ contactId, company: "New Co" }`) — it fell through to `createContact`, which requires a
+   `firstName` a patch payload doesn't necessarily repeat, and failed. Fixed by resolving `contactId`
+   directly first and filling in the existing contact's required fields as defaults before patching.
+   Found by the "replayed event returns the same stored result" integration test, not by hand-testing.
+2. **The same fix's first attempt spread `null` DB values into the merge input** (`phone: existing.phone`
+   where `existing.phone` was `null`), and `validateContact`'s Zod schema wants `string | undefined`
+   for optional fields, never `null` — rejected with `"phone": "Invalid input: expected string,
+   received null"`. Fixed by only including a default field when the existing value is non-null.
+3. **The `HIGHLEVEL_API_VERSION` default drifted between `.env.local` and `.env.example`.** Phase 5
+   updated the schema's default and `.env.example`, but the already-existing `.env.local` still had an
+   explicit `2021-07-28` override left over from Phase 1–3 — an explicit env var always wins over a
+   schema default, so the stale value was silently still in effect. Fixed by updating `.env.local` too,
+   and it's a reminder that changing a *default* doesn't reach machines that already pinned the old value.
+
+### n8n — actually run, not just written (this took real debugging)
+
+Pulled `n8nio/n8n:latest`, ran it in Docker, imported `n8n/leadflow-lead-intake.json` via the n8n CLI,
+activated it, and triggered its **real webhook URL** with `curl` against the **actual running LeadFlow
+dev server** (a separate process, not a mock). Three real failures were hit and fixed, in order:
+
+1. **`Module 'crypto' is disallowed`** — n8n's JS Task Runner sandboxes `require()` by default.
+   Fixed with `NODE_FUNCTION_ALLOW_BUILTIN=crypto` on the n8n container.
+2. **`access to env vars denied`** — the Code and HTTP Request nodes read `$env.WEBHOOK_SIGNING_SECRET`
+   / `$env.LEADFLOW_BASE_URL`; n8n blocks `$env` access in expressions by default. Fixed with
+   `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`.
+3. **The real bug, in the workflow JSON itself**: the HTTP Request node used
+   `"specifyBody": "raw"`, which isn't a valid value — `specifyBody` only exists (and only accepts
+   `"keypair"`/`"json"`) when `contentType` is `"json"`; raw-body mode is a *different* top-level
+   parameter, `"contentType": "raw"`, with the body field gated on `contentType: "raw"`, not on
+   `specifyBody`. With the wrong parameter set, n8n silently sent an **empty body** — LeadFlow computed
+   its expected signature over the real payload while n8n computed the header over that same payload
+   but sent nothing, so verification failed with a plain "signature does not match" and no hint that
+   the body itself was the problem. Found by pulling the actual node type schema from n8n's own
+   `/types/nodes.json` (fetched via its authenticated REST API — set up an owner account via
+   `/rest/owner/setup` specifically to read execution data, since there's no browser available here)
+   and comparing it against the JSON. Fixed by setting `contentType: "raw"` instead of `specifyBody`.
+4. A cosmetic-but-real fourth issue: **the "Notify success"/"Notify failure" Set nodes dropped the
+   original `statusCode`/`body` fields** by default (`includeOtherFields` defaults to `false`), so the
+   final "Respond to caller" node's `$json.statusCode < 400 ? 'accepted' : 'rejected'` always evaluated
+   `undefined < 400` → `false`. The IF branch and the notification text were both already correct by
+   this point — only the outer wrapper status was wrong. Fixed with `includeOtherFields: true`.
+
+**After all four fixes**, both branches were verified against the real running app: a valid lead
+payload → HighLevel-style 202 → `{"status":"accepted","leadflow":{...,"created":true,"detail":"New
+contact; workflow started"},"notification":"[SIMULATED] Lead accepted: … (HTTP 202)"}`; an invalid
+payload (missing `leadSource`) → 400 → `{"status":"rejected","leadflow":{"error":"Invalid lead
+data",...},"notification":"[SIMULATED] Lead REJECTED (HTTP 400): …"}`. The n8n container was removed
+after verification — it is not part of the ongoing dev setup, only proof the importable JSON works.
+
+### Manually verified this session (all six endpoints, against the real running app)
+
+Started the dev server as its own process, then for **every** resource type: sent a real HMAC-signed
+request with `npm run webhook:send` (or an ad-hoc signed payload for ones needing a real
+contact/opportunity id), confirmed the `202`/`4xx` response, ran `npm run worker:once`, and checked the
+database directly: `leads` created a contact + started the nurture workflow; `contacts` updated the
+company field; `opportunities` moved the stage; `appointments` inserted a row; `payments` moved the
+deal to Won **and** created the 4-task onboarding checklist; `messages` logged the reply **and**
+created a SIMULATED notification for the assigned rep. Also verified `--bad-signature` → 401 and
+`--expired` → 401 (`webhook:send`'s own flags).
+
+### Not verified this phase (stated honestly)
+
+- No real HighLevel account sent a real webhook — Ed25519 verification is tested against a locally
+  generated test keypair (`generateKeyPairSync("ed25519")` in `tests/webhook-signature.test.ts`), which
+  proves the *verification logic* is correct; it doesn't prove HighLevel's real signing key or payload
+  shape matches what's assumed here (see the doc-check note above on the unmapped `data` envelope).
+- The n8n container used for verification was removed afterward — it is not a persistent part of the
+  dev environment, only a one-time proof that the checked-in JSON imports and runs correctly. Re-running
+  it requires the same Docker setup documented in `DEMO_COMMANDS.md`.
+- Body-size limiting (413) relies on the `Content-Length` header plus a post-read byte check; a client
+  that lies about `Content-Length` while streaming without one is not specifically defended against
+  beyond the post-read check catching it after the fact (the body is still fully buffered by then) —
+  fine for this demo's threat model, not a production-grade streaming guard.
+
+---
+
 ## Phase 5 — HighLevel integration layer ✅
 
 ### Official docs checked before writing any code (2026-09-22)

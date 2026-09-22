@@ -14,6 +14,7 @@ import { PermanentJobError } from "@/lib/job-errors";
 import { claimDueJobs, completeJob, failJob, recoverAbandonedJobs, type Job } from "@/server/queue/queue";
 import { CRM_SYNC_CONTACT, CRM_SYNC_OPPORTUNITY, CRM_UPDATE_OPPORTUNITY, handleSyncContact, handleSyncOpportunity, handleUpdateOpportunity } from "@/server/workflows/crm-sync";
 import { FOLLOWUP_JOB, handleFollowUp, type HandlerResult } from "@/server/workflows/nurture";
+import { handleProcessWebhook, WEBHOOK_PROCESS_JOB } from "@/server/workflows/webhook-process";
 
 type Handler = (db: Database, job: Job, workerId: string) => Promise<HandlerResult>;
 
@@ -23,6 +24,7 @@ export const HANDLERS: Record<string, Handler> = {
   [CRM_SYNC_CONTACT]: handleSyncContact,
   [CRM_SYNC_OPPORTUNITY]: handleSyncOpportunity,
   [CRM_UPDATE_OPPORTUNITY]: handleUpdateOpportunity,
+  [WEBHOOK_PROCESS_JOB]: handleProcessWebhook,
 };
 export const SUPPORTED_JOB_TYPES = Object.keys(HANDLERS);
 

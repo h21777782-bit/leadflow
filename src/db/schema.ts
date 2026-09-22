@@ -393,6 +393,9 @@ export const webhookEvents = pgTable(
     signatureValid: boolean("signature_valid"),
     status: webhookStatusEnum("status").notNull().default("received"),
     error: text("error"),
+    // The job that does the actual processing (Phase 6: webhooks acknowledge fast, then a job
+    // handles the work). Set once enqueued; used by the Webhook Events screen's Reprocess button.
+    jobId: uuid("job_id").references(() => jobs.id, { onDelete: "set null" }),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
     processedAt: timestamp("processed_at", { withTimezone: true }),
   },
@@ -471,4 +474,23 @@ export const onboardingTasks = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("onboarding_tasks_contact_idx").on(t.contactId)],
+);
+
+// ── Sales notifications (Phase 6) ────────────────────────────────────────────
+// A rep-facing notification, e.g. "your lead replied". Channel is always "internal" —
+// this is a SIMULATED, in-app-only channel; no real email/SMS/Slack is ever sent.
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    recipientUserId: uuid("recipient_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    contactId: uuid("contact_id").references(() => contacts.id, { onDelete: "cascade" }),
+    channel: text("channel").notNull().default("internal"),
+    subject: text("subject").notNull(),
+    body: text("body").notNull(),
+    status: text("status").notNull().default("sent"),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("notifications_recipient_idx").on(t.recipientUserId, t.createdAt)],
 );

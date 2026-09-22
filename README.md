@@ -73,6 +73,7 @@ docker compose up -d
 | `npm run demo:b` | DEMO: simulated failure → retry → recovery (proves exactly one message despite the failure) |
 | `npm run demo:c` | DEMO: lead replies → follow-up skipped, workflow stopped |
 | `npm run demo:crm` | DEMO: simulated HighLevel outage (503) → retry → recovery → full audit trail |
+| `npm run webhook:send -- <resource>` | Signs and sends a test webhook (HMAC) to a running server; `--bad-signature` / `--expired` demo the 401 paths |
 
 ---
 
@@ -97,8 +98,8 @@ message listing every invalid variable. Secrets are never shown in the UI.
 | `HIGHLEVEL_API_BASE_URL` | no | Defaults to `https://services.leadconnectorhq.com` |
 | `HIGHLEVEL_API_VERSION` | no | Defaults to `v3` (sent as the `Version` header) — see `IMPLEMENTATION_LOG.md`, Phase 5, for the doc-check behind this default |
 | `HIGHLEVEL_HTTP_TIMEOUT_MS` | no (`10000`) | Real HighLevel calls are aborted and treated as a transient failure past this |
-| `HIGHLEVEL_WEBHOOK_PUBLIC_KEY` | Phase 6 | Ed25519 key for `X-GHL-Signature` verification |
-| `WEBHOOK_SIGNING_SECRET` | Phase 6 | HMAC secret for website / n8n webhooks |
+| `HIGHLEVEL_WEBHOOK_PUBLIC_KEY` | no | Ed25519 key for `X-GHL-Signature`; defaults to HighLevel's own fixed, published key (see `IMPLEMENTATION_LOG.md`, Phase 6) — set this only to test with a different keypair |
+| `WEBHOOK_SIGNING_SECRET` | for `/api/webhooks/*` (website/n8n) | HMAC-SHA256 secret; generate with `openssl rand -hex 32`. Required for the HMAC path — HighLevel's `X-GHL-Signature` path doesn't need it |
 | `FOLLOWUP_1_DELAY_SECONDS` | no (`30`) | Delay before the first follow-up (kept short for demos) |
 | `JOB_MAX_ATTEMPTS` | no (`5`) | Retries before a job is marked `failed` |
 | `RETRY_BASE_DELAY_SECONDS` / `RETRY_MAX_DELAY_SECONDS` | no (`15` / `3600`) | Exponential backoff bounds |
@@ -155,27 +156,41 @@ each response, and the worker is an infinite poll loop. See `IMPLEMENTATION_LOG.
 separate OS processes; the full step-by-step deployment guide is Phase 9's `DEPLOYMENT.md`
 (nothing has been deployed yet).
 
-Planned (later phases): webhook routes → `webhook_events` (dedupe) → reuse the intake/CRM
-services above, appointment booking, ops/reporting screens.
+Built as of Phase 6: `/api/webhooks/{leads,contacts,opportunities,appointments,payments,messages}`
+authenticate every request (HMAC-SHA256 for website/n8n, Ed25519 `X-GHL-Signature` for HighLevel)
+**before touching the database at all**, then either call an existing service directly (`leads` →
+`ingestLeadEvent`, already idempotent) or enqueue a `webhook.process` job through the same Phase 4
+queue (the other five resource types) and return `202` immediately. `webhook_events` is the
+idempotency + audit record either way — `UNIQUE(source, event_id)` means the same delivery twice is
+a no-op that replays the original result. An importable n8n workflow
+(`n8n/leadflow-lead-intake.json`) was built and **actually run** against a local n8n in Docker,
+signing and posting to a real running instance of this app — see `IMPLEMENTATION_LOG.md`, Phase 6.
+
+Planned (later phases): appointment booking (availability, reminders, reschedule/cancel — Phase 6
+only records what a webhook reports), ops/reporting screens, auth.
 
 ### Folder map
 
 ```
 src/
-  app/(app)/…            pages (Dashboard, Contacts, Lead details, Pipeline, Automations, Integrations, …)
+  app/(app)/…            pages (Dashboard, Contacts, Lead details, Pipeline, Automations, Integrations, Webhook events, …)
   app/api/health         liveness + DB check (503 when DB is down)
+  app/api/webhooks/      6 inbound webhook routes (thin — logic lives in server/http/webhook-route.ts)
   components/            sidebar + small UI primitives
   db/schema.ts           full database schema (all phases)
   db/seed-data.ts        demo dataset (pure data, unit-tested)
   db/seed.ts             transactional seed routine
-  lib/                   env validation, normalization, timezone, pipeline constants, backoff, job-errors
+  lib/                   env validation, normalization, timezone, pipeline constants, backoff, job-errors, webhook-signature
+  server/http/           shared webhook route handler (auth, size limit, dispatch) behind app/api/webhooks/*
   server/queries/        read-side data access used by pages
   server/queue/          job queue (enqueue, claim, complete/fail, recovery)
   server/worker/         worker runtime (handler registry, poll loop)
-  server/workflows/      nurture (follow-up) and crm-sync (outbox) workflows
+  server/workflows/      nurture (follow-up), crm-sync (outbox) and webhook-process workflows
   server/integrations/   messaging + CRM provider interfaces, mock implementations, real HighLevel client
-scripts/                 migrate / seed / worker / demo CLIs
+  server/services/       business rules, incl. payments (payment → won), appointments, notifications (Phase 6)
+scripts/                 migrate / seed / worker / demo / webhook:send CLIs
 drizzle/                 generated SQL migrations (committed)
+n8n/                     importable n8n workflow JSON
 tests/                   Vitest unit + DB integration tests
 ```
 
