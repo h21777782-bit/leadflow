@@ -95,6 +95,63 @@ export async function getDashboardSummary(now = new Date()) {
   };
 }
 
+// ── Reporting (Phase 8) ───────────────────────────────────────────────────────
+export type DateRange = { from?: Date; to?: Date };
+
+/**
+ * How many opportunities ever REACHED each stage (distinct opportunity per stage in
+ * stage_history), in pipeline order — a classic funnel: each later stage's count is
+ * a subset of every earlier one for a normal linear flow. "Lost" is reported alongside
+ * as a separate drop-off count, not as a funnel step.
+ */
+export async function getConversionFunnel(range: DateRange = {}) {
+  const db = getDb();
+  const dateFilter = and(range.from ? sql`${s.stageHistory.createdAt} >= ${range.from.toISOString()}::timestamptz` : undefined, range.to ? sql`${s.stageHistory.createdAt} <= ${range.to.toISOString()}::timestamptz` : undefined);
+  const rows = await db
+    .select({ stage: s.stageHistory.toStage, n: sql<number>`count(distinct ${s.stageHistory.opportunityId})::int` })
+    .from(s.stageHistory)
+    .where(dateFilter)
+    .groupBy(s.stageHistory.toStage);
+  const counts = Object.fromEntries(rows.map((r) => [r.stage, r.n])) as Partial<Record<PipelineStage, number>>;
+  return PIPELINE_STAGES.filter((st) => st !== "lost").map((stage) => ({ stage, count: counts[stage] ?? 0 }));
+}
+
+/**
+ * Average time (hours) spent in each stage before moving to the next one, computed from
+ * consecutive stage_history rows per opportunity (a window function, not app-side diffing,
+ * so it stays correct how ever many rows an opportunity has).
+ */
+export async function getTimeInStage(range: DateRange = {}) {
+  const db = getDb();
+  const dateFilter: string[] = [];
+  if (range.from) dateFilter.push(`h.created_at >= '${range.from.toISOString()}'::timestamptz`);
+  if (range.to) dateFilter.push(`h.created_at <= '${range.to.toISOString()}'::timestamptz`);
+  const where = dateFilter.length ? sql.raw(`where ${dateFilter.join(" and ")}`) : sql``;
+  const rows = await db.execute<{ stage: PipelineStage; avg_hours: number; n: number }>(sql`
+    select stage, avg(hours)::float as avg_hours, count(*)::int as n
+    from (
+      select
+        h.to_stage as stage,
+        extract(epoch from (coalesce(lead(h.created_at) over (partition by h.opportunity_id order by h.created_at), now()) - h.created_at)) / 3600.0 as hours
+      from stage_history h
+      ${where}
+    ) t
+    group by stage
+  `);
+  const byStage = new Map(rows.map((r) => [r.stage, { avgHours: r.avg_hours, n: r.n }]));
+  return PIPELINE_STAGES.map((stage) => ({ stage, avgHours: byStage.get(stage)?.avgHours ?? null, sampleSize: byStage.get(stage)?.n ?? 0 }));
+}
+
+/** Nurture workflow outcome breakdown — success/failure/still-running rates. */
+export async function getWorkflowRates(range: DateRange = {}) {
+  const db = getDb();
+  const dateFilter = and(range.from ? sql`${s.workflowRuns.startedAt} >= ${range.from.toISOString()}::timestamptz` : undefined, range.to ? sql`${s.workflowRuns.startedAt} <= ${range.to.toISOString()}::timestamptz` : undefined);
+  const rows = await db.select({ status: s.workflowRuns.status, n: sql<number>`count(*)::int` }).from(s.workflowRuns).where(dateFilter).groupBy(s.workflowRuns.status);
+  const counts = Object.fromEntries(rows.map((r) => [r.status, r.n])) as Partial<Record<string, number>>;
+  const total = rows.reduce((sum, r) => sum + r.n, 0);
+  return { total, counts, completedPct: total ? Math.round(((counts.completed ?? 0) / total) * 100) : null };
+}
+
 // ── Scoring & routing views ──────────────────────────────────────────────────
 const contactName = sql<string>`trim(${s.contacts.firstName} || ' ' || coalesce(${s.contacts.lastName}, ''))`;
 
@@ -295,7 +352,7 @@ export async function listWorkflowRuns() {
 
 export type JobStatus = (typeof s.jobStatusEnum.enumValues)[number];
 
-export async function listJobs({ statuses, limit = 100, contactId }: { statuses?: JobStatus[]; limit?: number; contactId?: string } = {}) {
+export async function listJobs({ statuses, type, limit = 100, contactId }: { statuses?: JobStatus[]; type?: string; limit?: number; contactId?: string } = {}) {
   const rows = await getDb()
     .select({
       id: s.jobs.id,
@@ -319,7 +376,7 @@ export async function listJobs({ statuses, limit = 100, contactId }: { statuses?
     })
     .from(s.jobs)
     .leftJoin(s.contacts, eq(s.contacts.id, s.jobs.contactId))
-    .where(and(statuses ? inArray(s.jobs.status, statuses) : undefined, contactId ? eq(s.jobs.contactId, contactId) : undefined))
+    .where(and(statuses ? inArray(s.jobs.status, statuses) : undefined, type ? eq(s.jobs.type, type) : undefined, contactId ? eq(s.jobs.contactId, contactId) : undefined))
     .orderBy(desc(s.jobs.updatedAt))
     .limit(limit);
   const attempts = rows.length
@@ -328,8 +385,14 @@ export async function listJobs({ statuses, limit = 100, contactId }: { statuses?
   return rows.map((r) => ({ ...r, attemptHistory: attempts.filter((a) => a.jobId === r.id) }));
 }
 
-export async function listFailedJobs() {
-  return listJobs({ statuses: ["failed", "retry_scheduled"] });
+/** Distinct job types that have ever failed or are retrying — for the Failed Automations filter dropdown. */
+export async function listFailedJobTypes(): Promise<string[]> {
+  const rows = await getDb().selectDistinct({ type: s.jobs.type }).from(s.jobs).where(inArray(s.jobs.status, ["failed", "retry_scheduled"])).orderBy(asc(s.jobs.type));
+  return rows.map((r) => r.type);
+}
+
+export async function listFailedJobs(filter: { status?: "failed" | "retry_scheduled"; type?: string } = {}) {
+  return listJobs({ statuses: filter.status ? [filter.status] : ["failed", "retry_scheduled"], type: filter.type });
 }
 
 export async function getAutomationOverview(now = new Date()) {

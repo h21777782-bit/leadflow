@@ -19,9 +19,15 @@ async function loadShellState(): Promise<{ mode: "mock" | "live"; failedCount: n
 
 export default async function AppLayout({ children }: LayoutProps<"/">) {
   const { mode, failedCount } = await loadShellState();
+  let loginEnabled = false;
+  try {
+    loginEnabled = Boolean(getEnv().ADMIN_PASSWORD);
+  } catch {
+    // Same "must render even when config is broken" reasoning as loadShellState above.
+  }
   return (
     <div className="flex min-h-screen">
-      <Sidebar mode={mode} failedCount={failedCount} />
+      <Sidebar mode={mode} failedCount={failedCount} loginEnabled={loginEnabled} />
       <main className="min-w-0 flex-1">{children}</main>
     </div>
   );

@@ -22,8 +22,13 @@ const envSchema = z
       }),
     APP_TIMEZONE: z.string().default("Asia/Kolkata"),
     DEFAULT_CURRENCY: z.string().length(3).default("USD"),
-    // No login in this demo: UI actions are attributed to this user (see server/services/actor.ts).
+    // Every UI action (however the admin is authenticated) is attributed to this one user —
+    // see server/services/actor.ts. There's no per-person login, just a single shared admin gate.
     DEMO_ACTOR_EMAIL: z.email().default("admin@leadflow.example"),
+
+    // Simple shared-password admin login (Phase 8). Unset = no gate, the app is fully open —
+    // convenient for local dev, but proxy.ts logs a warning so it's never silently open in prod.
+    ADMIN_PASSWORD: z.string().min(8, "ADMIN_PASSWORD must be at least 8 characters").optional(),
 
     // Integration mode. MOCK_MODE=true keeps every external call inside the
     // isolated mock provider (added in Phase 5).

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { logoutAction } from "@/app/actions/admin-auth";
 import {
   Activity,
   AlertTriangle,
@@ -46,7 +47,7 @@ const NAV: { heading: string; items: NavItem[] }[] = [
   },
 ];
 
-export function Sidebar({ mode, failedCount }: { mode: "mock" | "live"; failedCount: number }) {
+export function Sidebar({ mode, failedCount, loginEnabled }: { mode: "mock" | "live"; failedCount: number; loginEnabled: boolean }) {
   const pathname = usePathname();
 
   return (
@@ -99,6 +100,11 @@ export function Sidebar({ mode, failedCount }: { mode: "mock" | "live"; failedCo
           <p>
             <span className="font-medium text-white">Live mode.</span> Connected to HighLevel.
           </p>
+        )}
+        {loginEnabled && (
+          <form action={logoutAction} className="mt-3">
+            <button type="submit" className="text-faint hover:text-white hover:underline">Log out</button>
+          </form>
         )}
       </div>
     </aside>

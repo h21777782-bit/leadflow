@@ -8,14 +8,19 @@ import { Table, Td, Th } from "@/components/ui/table";
 import { getEnv } from "@/lib/env";
 import { formatDateTime, formatMoney } from "@/lib/format";
 import { OPEN_STAGES, SOURCE_LABEL, STAGE_META, type LeadSource } from "@/lib/pipeline";
-import { getDashboardSummary } from "@/server/queries";
+import { getConversionFunnel, getDashboardSummary, getTimeInStage, getWorkflowRates } from "@/server/queries";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
-export default async function DashboardPage() {
+export default async function DashboardPage({ searchParams }: PageProps<"/dashboard">) {
   await connection(); // always render with live data
   const tz = getEnv().APP_TIMEZONE;
-  const d = await getDashboardSummary();
+  const sp = await searchParams;
+  const from = typeof sp.from === "string" && sp.from ? new Date(sp.from) : undefined;
+  const to = typeof sp.to === "string" && sp.to ? new Date(`${sp.to}T23:59:59Z`) : undefined;
+  const range = { from: from && !Number.isNaN(from.getTime()) ? from : undefined, to: to && !Number.isNaN(to.getTime()) ? to : undefined };
+
+  const [d, funnel, timeInStage, workflowRates] = await Promise.all([getDashboardSummary(), getConversionFunnel(range), getTimeInStage(range), getWorkflowRates(range)]);
   const openCount = OPEN_STAGES.reduce((n, s) => n + d.byStage[s].count, 0);
   const automationTotal = d.automation.completed + d.automation.pending + d.automation.retrying + d.automation.failed;
 
@@ -37,6 +42,21 @@ export default async function DashboardPage() {
     <>
       <PageHeader title="Dashboard" description="How leads are moving through the pipeline and how the automations behind them are doing." />
       <div className="space-y-6 px-8 py-6">
+        <Panel title="Reporting date range" description="Applies to the funnel, time-in-stage, and workflow rates below (everything else on this page is always current).">
+          <form className="flex flex-wrap items-end gap-3 text-[13px]" method="GET">
+            <label>
+              <span className="mb-1 block font-medium">From</span>
+              <input type="date" name="from" defaultValue={typeof sp.from === "string" ? sp.from : ""} className="rounded-md border border-line-strong bg-surface px-2 py-1.5" />
+            </label>
+            <label>
+              <span className="mb-1 block font-medium">To</span>
+              <input type="date" name="to" defaultValue={typeof sp.to === "string" ? sp.to : ""} className="rounded-md border border-line-strong bg-surface px-2 py-1.5" />
+            </label>
+            <button type="submit" className="rounded-md border border-line-strong bg-surface px-3 py-1.5 font-medium hover:bg-canvas">Apply</button>
+            {(sp.from || sp.to) && <a href="/dashboard" className="text-accent hover:underline">Clear</a>}
+          </form>
+        </Panel>
+
         {/* Pipeline flow: the one bold element on the page */}
         <Panel title="Pipeline flow" description="Open opportunities by stage. Width is proportional to the number of deals.">
           {openCount === 0 ? (
@@ -217,6 +237,59 @@ export default async function DashboardPage() {
             )}
           </Panel>
         </div>
+
+        <div className="grid gap-6 xl:grid-cols-5">
+          <Panel title="Conversion funnel" description="Opportunities that ever reached each stage — a normal drop-off, not a live pipeline count." className="xl:col-span-3">
+            {funnel[0].count === 0 ? (
+              <EmptyState title="No opportunities in this date range" />
+            ) : (
+              <ul className="space-y-2">
+                {funnel.map((f) => {
+                  const pct = funnel[0].count ? Math.round((f.count / funnel[0].count) * 100) : 0;
+                  return (
+                    <li key={f.stage}>
+                      <div className="flex justify-between text-[13px]">
+                        <span>{STAGE_META[f.stage].label}</span>
+                        <span className="tabular">{f.count} ({pct}%)</span>
+                      </div>
+                      <div className="mt-1 h-2 rounded-full bg-pending-soft">
+                        <div className="h-2 rounded-full bg-accent" style={{ width: `${pct}%` }} />
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </Panel>
+
+          <Panel title="Workflow success/failure" description="New-lead nurture workflow outcomes." className="xl:col-span-2">
+            {workflowRates.total === 0 ? (
+              <EmptyState title="No workflow runs in this date range" />
+            ) : (
+              <dl className="space-y-2 text-[13px]">
+                <div className="flex justify-between"><dt>Total runs</dt><dd className="tabular font-medium">{workflowRates.total}</dd></div>
+                {Object.entries(workflowRates.counts).map(([status, n]) => (
+                  <div key={status} className="flex justify-between"><dt className="capitalize">{status.replace(/_/g, " ")}</dt><dd className="tabular">{n} ({Math.round(((n ?? 0) / workflowRates.total) * 100)}%)</dd></div>
+                ))}
+              </dl>
+            )}
+          </Panel>
+        </div>
+
+        <Panel title="Average time in stage" description="Hours from entering a stage to leaving it (or to now, if still there)." flush>
+          <Table>
+            <thead><tr><Th>Stage</Th><Th className="text-right">Avg. hours</Th><Th className="text-right">Sample size</Th></tr></thead>
+            <tbody>
+              {timeInStage.filter((t) => t.sampleSize > 0).map((t) => (
+                <tr key={t.stage}>
+                  <Td>{STAGE_META[t.stage].label}</Td>
+                  <Td className="tabular text-right">{t.avgHours != null ? t.avgHours.toFixed(1) : "—"}</Td>
+                  <Td className="tabular text-right">{t.sampleSize}</Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        </Panel>
 
         <Panel title="Recent automation activity" flush>
           <ul className="divide-y divide-line">

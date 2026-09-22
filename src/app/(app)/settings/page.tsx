@@ -13,8 +13,16 @@ import { listTeamAndRules } from "@/server/queries";
 
 export const metadata: Metadata = { title: "Settings" };
 
-export default async function SettingsPage() {
+function flashMessage(sp: Record<string, string | string[] | undefined>): string | null {
+  if (sp.repUpdated === "1") return `Saved. ${sp.moved ?? 0} lead(s) assigned, ${sp.left ?? 0} left unassigned.`;
+  if (sp.ruleUpdated === "1") return `Rule saved. ${sp.rerouted ?? 0} waiting lead(s) were assigned.`;
+  return null;
+}
+
+export default async function SettingsPage({ searchParams }: PageProps<"/settings">) {
   await connection();
+  const sp = await searchParams;
+  const flash = flashMessage(sp);
   const { team, rules } = await listTeamAndRules();
   const reps = team.filter((u) => u.role === "sales_rep");
   const nameById = new Map(team.map((u) => [u.id, u.name]));
@@ -39,6 +47,7 @@ export default async function SettingsPage() {
   return (
     <>
       <PageHeader title="Settings" description="Sales team availability and capacity, routing rules, and how leads are scored. Changes here re-route affected leads immediately." />
+      {flash && <p role="status" className="mx-8 mt-4 rounded-md bg-ok-soft px-3 py-2 text-ok">{flash}</p>}
       <div className="space-y-6 px-8 py-6">
         <Panel title="Sales team" description="Unavailable, inactive or full reps never receive new leads. Making a rep unavailable moves their not-yet-contacted leads; leads already in conversation stay." flush>
           <Table>

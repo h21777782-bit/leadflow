@@ -25,6 +25,7 @@ const FLASH: Record<string, string> = {
   updated: "Changes saved and recorded in the activity log.",
   merged: "The new details were merged into this existing contact.",
   unchanged: "Nothing changed, so nothing was saved.",
+  replied: "Reply logged and the score recalculated — see below.",
 };
 
 export default async function LeadDetailsPage({ params, searchParams }: PageProps<"/contacts/[id]">) {

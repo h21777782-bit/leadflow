@@ -1,22 +1,35 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { connection } from "next/server";
-import { RetryJobButton } from "@/components/automations/controls";
-import { StatusBadge } from "@/components/ui/badges";
+import { FailedJobsTable } from "@/components/automations/bulk-retry";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState, Panel } from "@/components/ui/panel";
-import { Table, Td, Th } from "@/components/ui/table";
+import { listFailedJobTypes, listFailedJobs } from "@/server/queries";
 import { getEnv } from "@/lib/env";
-import { formatDateTime } from "@/lib/format";
-import { listFailedJobs } from "@/server/queries";
 import { SUPPORTED_JOB_TYPES } from "@/server/worker/runner";
 
 export const metadata: Metadata = { title: "Failed automations" };
 
-export default async function FailedAutomationsPage() {
+export default async function FailedAutomationsPage({ searchParams }: PageProps<"/failed-automations">) {
   await connection();
+  const sp = await searchParams;
+  const status = sp.status === "failed" || sp.status === "retry_scheduled" ? sp.status : undefined;
+  const type = typeof sp.type === "string" && sp.type ? sp.type : undefined;
   const tz = getEnv().APP_TIMEZONE;
-  const jobs = await listFailedJobs();
+
+  const [jobs, types] = await Promise.all([listFailedJobs({ status, type }), listFailedJobTypes()]);
+  const rows = jobs.map((j) => ({
+    id: j.id,
+    type: j.type,
+    status: j.status,
+    attempts: j.attempts,
+    maxAttempts: j.maxAttempts,
+    lastError: j.lastError,
+    createdAt: j.createdAt.toISOString(),
+    contactId: j.contactId,
+    contactName: j.contactName,
+    attemptHistory: j.attemptHistory.map((a) => ({ id: a.id, attempt: a.attempt, outcome: a.outcome, error: a.error })),
+    retryable: SUPPORTED_JOB_TYPES.includes(j.type),
+  }));
 
   return (
     <>
@@ -25,49 +38,33 @@ export default async function FailedAutomationsPage() {
         description="Jobs that are retrying, or that used up every retry and now need a person to act. Records marked [demo seed] are demo data."
       />
       <div className="px-8 py-6">
+        <Panel className="mb-4" title="Filters">
+          <form className="flex flex-wrap items-end gap-3 text-[13px]" method="GET">
+            <label>
+              <span className="mb-1 block font-medium">Status</span>
+              <select name="status" defaultValue={status ?? ""} className="rounded-md border border-line-strong bg-surface px-2 py-1.5">
+                <option value="">All (failed + retrying)</option>
+                <option value="failed">Failed only</option>
+                <option value="retry_scheduled">Retry scheduled only</option>
+              </select>
+            </label>
+            <label>
+              <span className="mb-1 block font-medium">Job type</span>
+              <select name="type" defaultValue={type ?? ""} className="rounded-md border border-line-strong bg-surface px-2 py-1.5">
+                <option value="">All types</option>
+                {types.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </label>
+            <button type="submit" className="rounded-md border border-line-strong bg-surface px-3 py-1.5 font-medium hover:bg-canvas">Apply</button>
+            {(status || type) && <a href="/failed-automations" className="text-accent hover:underline">Clear</a>}
+          </form>
+        </Panel>
+
         <Panel flush>
-          {jobs.length === 0 ? (
+          {rows.length === 0 ? (
             <EmptyState title="Nothing has failed">When an automation runs out of retries it will appear here with its error.</EmptyState>
           ) : (
-            <Table>
-              <thead>
-                <tr>
-                  <Th>Workflow step</Th>
-                  <Th>Lead</Th>
-                  <Th>First attempt</Th>
-                  <Th>Error</Th>
-                  <Th className="text-right">Retries</Th>
-                  <Th>Status</Th>
-                  <Th>Retry</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {jobs.map((j) => {
-                  const retryable = SUPPORTED_JOB_TYPES.includes(j.type);
-                  return (
-                    <tr key={j.id}>
-                      <Td className="whitespace-nowrap font-medium">{j.type}</Td>
-                      <Td>
-                        {j.contactId ? (
-                          <Link href={`/contacts/${j.contactId}`} className="text-accent hover:underline">{j.contactName}</Link>
-                        ) : "—"}
-                      </Td>
-                      <Td className="tabular whitespace-nowrap text-[13px]">{formatDateTime(j.createdAt, tz)}</Td>
-                      <Td className="max-w-md text-[13px] text-bad">{j.lastError}</Td>
-                      <Td className="tabular text-right">{j.attempts} / {j.maxAttempts}</Td>
-                      <Td><StatusBadge status={j.status} /></Td>
-                      <Td>
-                        {retryable ? (
-                          <RetryJobButton jobId={j.id} contactId={j.contactId ?? undefined} />
-                        ) : (
-                          <p className="max-w-[14rem] text-[13px] text-muted">No worker handler exists for “{j.type}” jobs yet, so retrying cannot succeed.</p>
-                        )}
-                      </Td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </Table>
+            <FailedJobsTable jobs={rows} tz={tz} />
           )}
         </Panel>
       </div>

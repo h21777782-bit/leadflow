@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { getDb } from "@/db/client";
 import { getActingUser } from "@/server/services/actor";
 import { logInboundReply, processLeadChange, updateRepStatus } from "@/server/services/lead-intelligence";
@@ -14,14 +15,26 @@ function revalidateAll(contactId?: string) {
 
 export type SimpleState = { ok?: boolean; message?: string; error?: string; errors?: FieldErrors };
 
+/**
+ * These three actions redirect on success and only ever return state on
+ * error (same shape as createContactAction/updateContactAction) — NOT for
+ * the redirect's usual reason (a new URL), but because it's the fix for a
+ * real bug: a useActionState-bound form that returns a state object instead
+ * of redirecting hangs indefinitely for the no-JavaScript submission path in
+ * this Next.js build. Root-caused by elimination (see IMPLEMENTATION_LOG.md,
+ * Phase 8) down to "any non-redirecting action bound to useActionState",
+ * reproduced even with an action that does nothing but return a static
+ * value — unrelated to revalidatePath, the database call, or anything else
+ * in application code. Redirecting also revalidates + re-renders the
+ * destination in the same round trip, so revalidateAll() still runs first.
+ */
 export async function logReplyAction(contactId: string, _prev: SimpleState, fd: FormData): Promise<SimpleState> {
   const db = getDb();
   const r = await logInboundReply(db, await getActingUser(db), contactId, { channel: String(fd.get("channel") ?? "email"), body: String(fd.get("body") ?? "") });
   if (r.status === "invalid") return { error: r.error };
   if (r.status === "not_found") return { error: "Contact not found" };
   revalidateAll(contactId);
-  const sc = r.outcome.score;
-  return { ok: true, message: sc?.changed ? `Reply logged. Score ${sc.previous.score} → ${sc.result.score}.` : "Reply logged. Score unchanged." };
+  redirect(`/contacts/${contactId}?replied=1`);
 }
 
 /** Recalculate score and, if the lead is unassigned, route it now (a human asked — this also clears a manual unassign). */
@@ -53,7 +66,7 @@ export async function updateRepAction(userId: string, _prev: SimpleState, fd: Fo
   revalidateAll();
   const moved = r.rerouted.filter((x) => x.outcome && (x.outcome.status === "assigned" || x.outcome.status === "reassigned")).length;
   const left = r.rerouted.filter((x) => x.outcome?.status === "unassigned").length;
-  return { ok: true, message: `Saved. ${r.rerouted.length} lead(s) re-evaluated: ${moved} assigned, ${left} left unassigned.` };
+  redirect(`/settings?repUpdated=1&moved=${moved}&left=${left}`);
 }
 
 export async function saveRuleAction(ruleId: string | null, _prev: SimpleState, fd: FormData): Promise<SimpleState> {
@@ -73,5 +86,5 @@ export async function saveRuleAction(ruleId: string | null, _prev: SimpleState, 
   if (r.status === "invalid") return { errors: r.errors };
   if (r.status === "not_found") return { error: "Rule not found" };
   revalidateAll();
-  return { ok: true, message: `Rule saved. ${r.rerouted} waiting lead(s) were assigned.` };
+  redirect(`/settings?ruleUpdated=1&rerouted=${r.rerouted}`);
 }

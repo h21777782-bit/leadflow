@@ -26,6 +26,23 @@ export async function retryJobAction(jobId: string, contactId?: string): Promise
   return { ok: true, message: r.message };
 }
 
+/** Guarded: only ever called from a confirmed selection, and skips (rather than errors on) anything not actually retryable. */
+export async function bulkRetryJobsAction(jobIds: string[]): Promise<ActionResult> {
+  if (jobIds.length === 0) return { ok: false, message: "Nothing selected" };
+  if (jobIds.length > 200) return { ok: false, message: "Select 200 or fewer jobs at a time" };
+  const db = getDb();
+  const actor = await getActingUser(db);
+  let retried = 0;
+  let skipped = 0;
+  for (const jobId of jobIds) {
+    const r = await retryJobNow(db, actor, jobId, SUPPORTED_JOB_TYPES);
+    if (r.status === "ok") retried++;
+    else skipped++;
+  }
+  revalidateAutomations();
+  return { ok: retried > 0, message: `Retried ${retried} of ${jobIds.length}${skipped ? ` (${skipped} skipped — not retryable, e.g. no handler or wrong status)` : ""}` };
+}
+
 export async function cancelJobAction(jobId: string, reason: string, contactId?: string): Promise<ActionResult> {
   const db = getDb();
   const r = await cancelJob(db, await getActingUser(db), jobId, reason.trim() || "Cancelled manually");
