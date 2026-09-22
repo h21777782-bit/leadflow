@@ -20,3 +20,11 @@ export function uniqueViolation(err: unknown): string | null {
   }
   return null;
 }
+
+/** Returns the violated constraint name for an exclusion violation (SQLSTATE 23P01 — e.g. double-booking), else null. */
+export function exclusionViolation(err: unknown): string | null {
+  for (const e of errorChain(err)) {
+    if (e.code === "23P01") return e.constraint_name ?? e.constraint ?? "unknown_constraint";
+  }
+  return null;
+}

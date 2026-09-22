@@ -387,7 +387,53 @@ npx vitest run tests/webhook-signature.test.ts      # 13 pure tests: valid/tampe
 npx vitest run tests/webhooks-integration.test.ts   # 13 real-Postgres tests: duplicate delivery, payment→won, reprocess
 ```
 
-## 13. Reset before an interview
+## 13. Phase 7 — appointment booking
+
+> `npm run db:seed` first restores each rep's default working hours (09:00–17:00, Mon–Fri, their own timezone).
+
+### 13a. In the browser
+
+1. `/settings` → **Working hours** column per rep — change one (e.g. Sophie Turner's start to `11:00`), Save.
+2. `/appointments` → **Book an appointment**: pick a contact, a rep, a duration, a search window → **Find available slots**.
+   Point out: slots respect the rep's working hours *in their own timezone*, and once a rep is unavailable becomes clear at a glance.
+3. Pick a slot → a title → **Book appointment**. Then open that lead's page: stage moved to **Appointment booked**, the
+   nurture workflow (if it had one running) shows **Stopped**, and the message/activity timeline shows the SIMULATED confirmation.
+4. Back on `/appointments`, the new row has **Confirm / Reschedule / Completed / No-show / Cancel**. Try **Reschedule** —
+   pick a new time, Confirm — then try booking a DIFFERENT lead with that same rep at the exact same (old) slot to show it's free again.
+5. Try booking the same rep at a slot that's already taken (pick a slot, then open the same form in another tab and book
+   the same slot before confirming) — the second one is refused with a clear conflict message, not a raw server error.
+
+### 13b. Prove double-booking is impossible at the database level (not just in the UI)
+
+```bash
+npx vitest run tests/appointments-integration.test.ts
+```
+
+Point at: *the database refuses a raw overlapping INSERT for the same rep, even outside the service
+layer* (a hand-written INSERT, no application code involved) and *concurrent booking: two simultaneous
+requests for the same rep and overlapping time — exactly one succeeds* (a real `Promise.all` race).
+
+### 13c. DST-safe scheduling
+
+```bash
+npx vitest run tests/scheduling.test.ts
+```
+
+Point at *DST-safe: 09:00 local stays 09:00 local on both sides of the spring-forward transition* and
+the fall-back equivalent — both assert the exact UTC instant shifts by the DST offset while the rep's
+local start time never moves, and neither day silently gains or loses a working-hours slot.
+
+### 13d. Reminders and idempotent booking
+
+- Book something for later today (inside the next hour) vs. next week, and compare `select type from
+  jobs where appointment_id = '<id>'` — the near-term one only gets a 1h reminder (the 24h window has
+  already passed and is correctly skipped, not sent late); the far one gets both.
+- Cancel an appointment with pending reminders → `select status from jobs where appointment_id =
+  '<id>'` → both reminder jobs flip to `cancelled` immediately, not left to expire.
+- `npx vitest run tests/appointments-integration.test.ts` → *upsertAppointmentFromWebhook is idempotent
+  on ghlAppointmentId: delivered twice updates in place, never creates two rows*.
+
+## 14. Reset before an interview
 
 ```bash
 npm run db:seed        # restores the exact demo dataset

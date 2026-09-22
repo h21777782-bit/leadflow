@@ -6,7 +6,7 @@
 
 The full project walkthrough (2-minute and 5-minute versions) will be added in Phase 9.
 This file currently covers **Phase 3: scoring and routing**, **Phase 4: the automation engine**,
-**Phase 5: the HighLevel integration layer**, and **Phase 6: webhooks and n8n**.
+**Phase 5: the HighLevel integration layer**, **Phase 6: webhooks and n8n**, and **Phase 7: appointment booking**.
 
 ---
 
@@ -207,3 +207,46 @@ The part I'm proudest of: I didn't just write the importable n8n workflow JSON a
 4. `npm run webhook:send -- payments` (after putting a real opportunity id in) → open that lead's page → stage **Won**, onboarding checklist created.
 5. If time allows: the n8n Docker demo from `DEMO_COMMANDS.md` §12e — genuinely trigger the real webhook URL and show both the success and failure branch responses.
 6. Terminal: `npx vitest run tests/webhooks-integration.test.ts` → point at *concurrent duplicates: 5 simultaneous deliveries … create exactly one row and one job* and *payment → won: … idempotent on externalPaymentId*.
+
+---
+
+## Phase 7: appointment booking — 2-minute explanation (say this)
+
+"Booking an appointment isn't just writing a row — it's one function, `bookAppointment()`, that does everything a real booking needs together: it moves the deal's stage, stops the lead's follow-up sequence immediately rather than waiting for its next scheduled check, sends a confirmation, schedules 24-hour and 1-hour reminder jobs, notifies the assigned rep, rescores the lead now that they've got a meeting booked, and queues a HighLevel calendar sync. Both the UI's booking form and the appointments webhook call that exact same function, so there's no way for a booking made one way to skip a step a booking made the other way includes.
+
+Two things I was specific about. First, timezones: a rep's working hours are wall-clock time in their own zone, but slots are shown to the lead in theirs — and it's DST-safe, which I didn't just assert, I tested against both of this year's actual US clock-change dates and confirmed a working day never silently gains or loses an hour of availability. Second, double-booking: I didn't rely on an application-level check, which can race under concurrent requests. I added a Postgres exclusion constraint — the database itself physically refuses two overlapping, non-cancelled appointments for the same rep — and proved it with a real concurrent-request test, not just a single-threaded one."
+
+---
+
+## Appointment booking — technical questions with accurate answers
+
+**1. How do you guarantee two people can't book the same rep at the same time?**
+> Two layers, and only one of them is actually load-bearing. The service layer tries an insert and returns a clean "conflict" result if it fails — that's for a good user experience. The real guarantee is a Postgres `EXCLUDE USING gist` constraint on the appointments table: `owner_id` equality combined with a time-range overlap check, database-enforced, so it's correct even under true concurrency where two requests hit the database at almost the same instant. I proved this specifically — a test that fires two `bookAppointment` calls with `Promise.all` for the same rep and the same overlapping time, and asserts exactly one comes back `booked` and one `conflict`, never both succeeding and never both failing.
+
+**2. Walk me through what "DST-safe" actually means here, concretely.**
+> A rep's 9am-to-5pm working day is wall-clock time in their own timezone. On most days that's simply 8 hours in UTC too, but on the two days a year the clocks change, it's 7 or 9. My slot generator computes each calendar day's start and end independently — it converts "9am on this specific date, in this timezone" to UTC fresh for that date, rather than generating one day's slots and then mechanically adding 24 hours for the next. I tested both 2026 US transitions directly: on the day clocks spring forward, the first slot's local time is still 09:00 even though its UTC instant shifted by an hour, and the working day still produces the full number of slots — DST never quietly drops or duplicates an hour of someone's calendar.
+
+**3. Why does the appointments webhook call the same function as the booking form, instead of just writing to the appointments table directly?**
+> Because an appointment reported by an external calendar needs the exact same side effects as one booked in our own UI — the deal should still move to Appointment Booked, the lead's follow-ups should still stop, the rep should still be notified. If the webhook had its own, simpler write path, it would be very easy for those two paths to drift apart over time as one gets a bug fix or a new step and the other doesn't. Reusing `bookAppointment` (and `rescheduleAppointment` for an update to an already-known HighLevel appointment id) means there's structurally only one path, so that drift can't happen. I verified this live, not just architecturally: a real signed webhook request for an existing contact produced the exact same stage change, reminder jobs, and notification as booking through the UI would have.
+
+**4. What happens to a reminder if the appointment gets cancelled after the reminder job was already scheduled?**
+> Two things, deliberately redundant. Cancelling an appointment immediately cancels its pending reminder jobs — that's the common case, and it means a cancelled reminder never even gets picked up by the worker. But I also built defense in depth for the race where a job is claimed by a worker at almost the exact moment someone cancels: the reminder handler reloads the appointment's current status right before sending anything, and if it's cancelled, it skips — no message goes out. I have a test that specifically forces that race (marks the appointment cancelled through a different path than the normal cancel flow, then runs the reminder handler directly) to prove the guard works even when the "normal" cancellation path is bypassed.
+
+**5. What did `npm run build` catch that your tests didn't?**
+> Three server actions were first written as `export const markNoShowAction = (...) => ...` — arrow functions delegating to a shared helper, inside a file with `"use server"` at the top. TypeScript compiled it fine, and all 216 tests passed, because none of that logic is actually wrong. But `next build` failed: Next's Server Actions compiler needs to statically find each exported action as a directly-declared `async function` to build its client-callable action reference manifest, and a const-assigned arrow function doesn't satisfy that. It's a good example of why I always run the full `npm run verify` — typecheck and tests prove the logic is correct, but only an actual build proves the framework can ship it.
+
+**Likely follow-ups**
+- *"Why not just check availability with a `SELECT` before inserting?"* → I do, for a fast, friendly rejection in the UI — but a check-then-insert has a race window between the check and the write. Two requests can both pass the check and then both insert. The exclusion constraint closes that window entirely, at the only layer that can: the database transaction itself.
+- *"Why not use HighLevel's own free-slots endpoint for availability?"* → I considered it, and deliberately didn't: it would mean two systems could disagree about what's free, and one of them requires a network call I can't guarantee is fast or even available. Our own schedule is authoritative; HighLevel's calendar is a one-way sync target so their system reflects what we booked, not a second source of truth we have to reconcile.
+- *"What's still unverified?"* → The exact response field name from HighLevel's real create-appointment endpoint — my Phase 5 documentation check confirmed the request shape but not the response shape for that specific endpoint, and I said so directly in the code and the docs rather than presenting it as more certain than it is.
+
+---
+
+## Step-by-step live demo — Phase 7 (≈3 minutes)
+
+1. **`/settings`** → point at a rep's working hours (own timezone, editable days).
+2. **`/appointments`** → **Book an appointment**: pick a contact and rep, **Find available slots** — point out both the rep's and the lead's local time shown per slot.
+3. Book one → open that lead's page → stage **Appointment booked**, workflow **Stopped**, confirmation message in the timeline.
+4. Back on `/appointments`, **Reschedule** it, then show a fresh booking attempt at the *old* slot succeeding (it's free again).
+5. Terminal: `npx vitest run tests/appointments-integration.test.ts` → point at *the database refuses a raw overlapping INSERT* and *concurrent booking … exactly one succeeds*.
+6. Terminal: `npx vitest run tests/scheduling.test.ts` → point at the two DST transition tests.

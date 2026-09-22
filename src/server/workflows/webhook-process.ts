@@ -116,6 +116,8 @@ async function processAppointments(db: Database, actor: Actor, payload: Record<s
     notes: typeof payload.notes === "string" ? payload.notes : null,
   });
   if (r.status === "invalid") throw new PermanentJobError(r.error);
+  if (r.status === "conflict") throw new PermanentJobError(r.error);
+  if (r.status === "not_found") throw new PermanentJobError(`Contact ${contactId} not found`);
   return `appointment ${r.appointmentId} ${r.status}`;
 }
 

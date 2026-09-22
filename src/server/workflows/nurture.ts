@@ -244,6 +244,23 @@ export async function handleFollowUp(db: Database, job: Job, workerId: string): 
   return { outcome: "completed", note };
 }
 
+/**
+ * Immediately stops a contact's running nurture workflow, same shape as the handler's own
+ * internal stop-on-appointment-booked path — used by appointment booking (Phase 7) so a
+ * lead's follow-ups stop the instant an appointment is booked, not on the next poll.
+ */
+export async function stopWorkflowForContact(db: Database, actor: Actor, contactId: string, reason: string): Promise<{ stopped: boolean }> {
+  const [run] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.contactId, contactId), eq(workflowRuns.workflowKey, NURTURE), eq(workflowRuns.status, "running")));
+  if (!run) return { stopped: false };
+  await db.transaction(async (tx) => {
+    await tx.update(workflowRuns).set({ status: "stopped", stopReason: reason, currentStep: null, finishedAt: sql`now()` }).where(eq(workflowRuns.id, run.id));
+    await cancelPendingJobsForRun(tx, run.id, `Workflow stopped: ${reason}`);
+    await tx.update(contacts).set({ nextFollowUpAt: null }).where(eq(contacts.id, contactId));
+    await writeAudit(tx, actor, { eventType: "followup.skipped", entityType: "workflow_run", entityId: run.id, contactId, message: `Workflow stopped — ${reason}`, metadata: { reason } });
+  });
+  return { stopped: true };
+}
+
 // ── Manual controls ──────────────────────────────────────────────────────────
 export async function cancelWorkflowRun(db: Database, actor: Actor, runId: string, reason: string) {
   return db.transaction(async (tx) => {

@@ -38,6 +38,7 @@ export type EnqueueInput = {
   contactId?: string | null;
   opportunityId?: string | null;
   workflowRunId?: string | null;
+  appointmentId?: string | null;
   maxAttempts?: number;
 };
 
@@ -53,6 +54,7 @@ export async function enqueueJob(db: DbOrTx, input: EnqueueInput): Promise<{ job
       contactId: input.contactId ?? null,
       opportunityId: input.opportunityId ?? null,
       workflowRunId: input.workflowRunId ?? null,
+      appointmentId: input.appointmentId ?? null,
       maxAttempts: input.maxAttempts ?? getEnv().JOB_MAX_ATTEMPTS,
       status: "pending",
     })
@@ -311,6 +313,16 @@ export async function cancelPendingJobsForRun(tx: DbOrTx, workflowRunId: string,
         exceptJobId ? sql`${jobs.id} <> ${exceptJobId}` : undefined,
       ),
     )
+    .returning({ id: jobs.id });
+  return rows.length;
+}
+
+/** Cancel every not-yet-run job for an appointment (Phase 7: its 24h/1h reminders) — used on cancel/reschedule. */
+export async function cancelPendingJobsForAppointment(tx: DbOrTx, appointmentId: string, reason: string): Promise<number> {
+  const rows = await tx
+    .update(jobs)
+    .set({ status: "cancelled", statusReason: reason, completedAt: sql`now()`, updatedAt: sql`now()` })
+    .where(and(eq(jobs.appointmentId, appointmentId), inArray(jobs.status, ["pending", "retry_scheduled"])))
     .returning({ id: jobs.id });
   return rows.length;
 }

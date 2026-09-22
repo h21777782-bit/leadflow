@@ -2,10 +2,12 @@
  * Sales notifications — SIMULATED, in-app only. No real email/SMS/Slack/push
  * is ever sent; every row is clearly labelled and only ever read back by our
  * own UI. Phase 6: a rep is notified when their assigned lead replies.
+ * Phase 7: also notified when their lead books an appointment.
  */
 import type { Database } from "@/db/client";
 import { notifications } from "@/db/schema";
 import { fullName } from "@/lib/normalize";
+import { formatDateTime } from "@/lib/format";
 import { writeAudit } from "./audit";
 import type { Actor } from "./types";
 
@@ -32,6 +34,33 @@ export async function notifyRepOfReply(
     entityId: contact.id,
     contactId: contact.id,
     message: `[SIMULATED] Notified owner that ${name} replied`,
+  });
+  return { notified: true };
+}
+
+export async function notifyRepOfAppointment(
+  db: Database,
+  actor: Actor,
+  contact: { id: string; firstName: string; lastName: string | null; ownerId: string | null },
+  appointment: { title: string; startsAt: Date; timezone: string },
+): Promise<{ notified: boolean }> {
+  if (!contact.ownerId) return { notified: false };
+  const name = fullName(contact.firstName, contact.lastName);
+  const when = formatDateTime(appointment.startsAt, appointment.timezone);
+  await db.insert(notifications).values({
+    recipientUserId: contact.ownerId,
+    contactId: contact.id,
+    channel: "internal",
+    subject: `${name} booked: ${appointment.title}`,
+    body: `[SIMULATED] ${name} booked "${appointment.title}" at ${when} (${appointment.timezone})`,
+    status: "sent",
+  });
+  await writeAudit(db, actor, {
+    eventType: "notification.sent",
+    entityType: "contact",
+    entityId: contact.id,
+    contactId: contact.id,
+    message: `[SIMULATED] Notified owner that ${name} booked an appointment`,
   });
   return { notified: true };
 }

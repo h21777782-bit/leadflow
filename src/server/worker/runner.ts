@@ -12,7 +12,8 @@ import { workerHeartbeats } from "@/db/schema";
 import { getEnv } from "@/lib/env";
 import { PermanentJobError } from "@/lib/job-errors";
 import { claimDueJobs, completeJob, failJob, recoverAbandonedJobs, type Job } from "@/server/queue/queue";
-import { CRM_SYNC_CONTACT, CRM_SYNC_OPPORTUNITY, CRM_UPDATE_OPPORTUNITY, handleSyncContact, handleSyncOpportunity, handleUpdateOpportunity } from "@/server/workflows/crm-sync";
+import { handleReminder1h, handleReminder24h, REMINDER_1H_JOB, REMINDER_24H_JOB } from "@/server/workflows/appointment-reminders";
+import { CRM_SYNC_APPOINTMENT_JOB, CRM_SYNC_CONTACT, CRM_SYNC_OPPORTUNITY, CRM_UPDATE_OPPORTUNITY, handleSyncAppointment, handleSyncContact, handleSyncOpportunity, handleUpdateOpportunity } from "@/server/workflows/crm-sync";
 import { FOLLOWUP_JOB, handleFollowUp, type HandlerResult } from "@/server/workflows/nurture";
 import { handleProcessWebhook, WEBHOOK_PROCESS_JOB } from "@/server/workflows/webhook-process";
 
@@ -25,6 +26,9 @@ export const HANDLERS: Record<string, Handler> = {
   [CRM_SYNC_OPPORTUNITY]: handleSyncOpportunity,
   [CRM_UPDATE_OPPORTUNITY]: handleUpdateOpportunity,
   [WEBHOOK_PROCESS_JOB]: handleProcessWebhook,
+  [CRM_SYNC_APPOINTMENT_JOB]: handleSyncAppointment,
+  [REMINDER_24H_JOB]: handleReminder24h,
+  [REMINDER_1H_JOB]: handleReminder1h,
 };
 export const SUPPORTED_JOB_TYPES = Object.keys(HANDLERS);
 

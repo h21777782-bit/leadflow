@@ -5,6 +5,95 @@ Newest phase at the top.
 
 ---
 
+## Phase 7 — Appointment booking ✅
+
+### Docs re-checked (2026-09-23)
+
+The calendar endpoints were already checked in Phase 5's doc-check pass (`marketplace.gohighlevel.com`,
+2026-09-22) and deliberately not implemented then — this phase implements them, using the same
+findings:
+
+| What | URL | Finding |
+|---|---|---|
+| Create appointment | `/docs/ghl/calendars/create-appointment/` | `POST /calendars/events/appointments`, body `{ calendarId, locationId, contactId, title, startTime, endTime }`. **The response's field name for the new id was not captured in the Phase 5 check** — `HighLevelProvider.createAppointment()` reads `res.id`, HighLevel's usual convention, but this is **UNVERIFIED** against a real response; flagged in code and here rather than presented as confirmed. |
+| Free slots | `/docs/ghl/calendars/get-slots/` | Recorded in Phase 5 but **deliberately not used**: our own availability (`src/lib/scheduling.ts`) is the source of truth for booking (DST-safe, tested, and doesn't depend on network access), so HighLevel's calendar is a one-way sync target (`createAppointment` only), never a second, potentially-conflicting availability source. |
+
+### What was built
+
+| File | What it does |
+|---|---|
+| `src/lib/scheduling.ts` | Pure, DST-safe slot generation (`generateCandidateSlots`, `excludeBookedSlots`, `isSlotAvailable`) — built on the existing `src/lib/timezone.ts` from Phase 1, not a new date library. 11 unit tests including both 2026 US DST transitions. |
+| `drizzle/0004_appointments_booking.sql` | `users.working_hours_start/end/days`, `jobs.appointment_id` (auto-generated), plus a **hand-added** `EXCLUDE USING gist` constraint (`btree_gist`) on `appointments (owner_id, tstzrange(starts_at, ends_at))` — the database itself refuses two overlapping non-cancelled appointments for the same rep, not just application logic. Manually verified with raw SQL before writing any app code (a real overlapping INSERT fails; a back-to-back one and a cancelled overlap both succeed). |
+| `src/server/services/appointments.ts` (rewritten) | `bookAppointment()` — the one path for "a slot is now held": insert (EXCLUDE-constraint-safe) → stage → `appointment_booked` → stop the nurture workflow immediately → SIMULATED confirmation message → 24h/1h reminder jobs (skipped if already past) → notify the rep → rescore → enqueue HighLevel sync. Also `rescheduleAppointment`, `cancelAppointment`, `markNoShow`/`markCompleted`/`confirmAppointment`, and `getAvailableSlots`. `upsertAppointmentFromWebhook` now calls `bookAppointment`/`rescheduleAppointment` instead of writing the row itself — the webhook and the UI form are the same code path, verified live (see below). |
+| `src/server/workflows/nurture.ts` (`stopWorkflowForContact`) | New export exposing the nurture engine's own internal stop logic, so booking can stop follow-ups immediately rather than waiting for the next scheduled attempt to notice. |
+| `src/server/workflows/appointment-reminders.ts` | `appointment.reminder_24h`/`_1h` job handlers — reload the appointment's current status before sending, so a reminder is never sent for a slot cancelled after the job was scheduled. |
+| `src/server/integrations/crm/*` (extended) | `CrmProvider.createAppointment()` added to the Phase 5 interface; Mock and HighLevel implementations. `crm.sync_appointment` job in `crm-sync.ts`, same ordering-by-retry pattern as contacts/opportunities. |
+| `src/app/actions/appointments.ts`, `src/components/appointments/{booking-form,row-actions}.tsx`, `src/app/(app)/appointments/page.tsx` (rewritten) | Booking form (rep/contact/duration/window → Find slots → pick → book, showing both timezones), and per-row Confirm/Reschedule/Complete/No-show/Cancel. |
+| `src/components/settings/working-hours-editor.tsx` | Per-rep working hours (start/end/days) on the Settings page — rep's own timezone, as the prompt requires. |
+| `src/db/errors.ts` (`exclusionViolation`) | Companion to the existing `uniqueViolation` — SQLSTATE 23P01, not 23505 — so a double-booking attempt returns a clean `{status:"conflict"}` instead of a raw Postgres error. |
+| `tests/scheduling.test.ts` (11), `tests/appointments-integration.test.ts` (10) | DST tests (both 2026 US transitions, asserting local wall-clock time stays fixed while the UTC instant shifts), concurrent double-booking (`Promise.all`, exactly one `booked`), reminder-skipped-after-cancel (both via job cancellation and defense-in-depth if a job somehow still runs), idempotent booking webhook (same `ghlAppointmentId` twice updates in place). |
+
+### Errors encountered and fixes
+
+1. **A real Next.js build-only bug, invisible to typecheck and tests.** `markNoShowAction`,
+   `markCompletedAction`, `confirmAppointmentAction` were first written as `export const x = (...) =>
+   ...` (arrow functions delegating to a shared helper) inside a `"use server"` file. `tsc` was happy;
+   all 216 tests passed; only `next build` failed, with "export markCompletedAction was not found in
+   module" — Next's Server Actions compiler requires each exported action to be a directly-declared
+   `async function`, not a const arrow function, to build its action-reference manifest. Fixed by
+   spelling out three short `async function` wrappers instead of the arrow-function shorthand. This is
+   exactly the kind of bug `npm run verify`'s `build` step exists to catch — and did.
+2. **My own first test draft had two real bugs, not the code.** `farFutureSlot()` computed `Date.now()
+   + 10 days` on every call — nearly the same instant across fast-running tests in the same file, all
+   reusing "the first seeded sales rep" from `aRep()`. Later tests collided with earlier tests'
+   leftover (intentionally not cleaned up) appointments for that exact rep and time, so a "concurrent
+   booking" test that should see one `booked`/one `conflict` saw two `conflict`s instead — both
+   requests genuinely conflicted, just with stale data from a *different* test, not with each other.
+   Fixed by giving every call a distinct day offset. Separately, asserting on the raw Postgres error's
+   top-level `.message` (`/exclusion constraint/`) failed because Drizzle/postgres.js wrap the real
+   driver message inside `.cause`; fixed by using the new `exclusionViolation()` helper instead of
+   string-matching an error shape that isn't actually where the codebase's own convention (see
+   `uniqueViolation`) says to look.
+3. **`claimDueJobs(..., 20)` didn't find a specific job** in an integration test, because by that point
+   in a long-running suite sharing one `TEST_DATABASE_URL`, more than 20 other jobs across multiple
+   test files were already due. Not a product bug — the real worker's batch size (`WORKER_BATCH_SIZE`,
+   default 5) exists precisely to bound how much a real worker claims per poll; a test asserting on one
+   specific job needs a batch large enough to find it, which a live worker never needs since it just
+   loops. Fixed by raising the test's claim limit, with a comment explaining why.
+
+### Manually verified this session (live, against the real running app)
+
+Wrote and ran two throwaway smoke-test scripts (deleted after use, not committed) against the dev
+database and, for the webhook path, a real running `next dev` server:
+
+- Direct booking: found 79 real candidate slots for a seeded rep's working week, booked one, confirmed
+  a *second* concurrent-style booking attempt for the exact same slot was correctly refused
+  (`status: "conflict"`), saw the confirmation message, the correct subset of reminder jobs (the 24h
+  reminder was correctly *skipped* because the found slot was under 24h away — proving the "skip if
+  already past" logic, not just asserting it in a test), the rep notification, rescheduled it, then
+  cancelled it and confirmed every pending reminder/sync job for that appointment flipped to
+  `cancelled`.
+- Webhook path: a real signed HTTP `POST /api/webhooks/appointments` for an existing seeded contact,
+  processed by the worker, produced the exact same side effects (stage → `appointment_booked`, both
+  reminder jobs scheduled since this one was booked 3 days out) — confirming the webhook and the UI
+  booking form are genuinely the same code path, not just claimed to be.
+- `npm run build` was run to completion (see the Next.js server-action bug above) and the built
+  production server was started and both `/appointments` and `/settings` were checked to render the
+  new UI (HTTP 200, expected UI text present).
+
+### Not verified this phase (stated honestly)
+
+- `HighLevelProvider.createAppointment()`'s response parsing (`res.id`) has not been checked against a
+  real HighLevel response — only the request shape is doc-confirmed (see the doc-check table above).
+- HighLevel's calendar `free-slots` endpoint (documented in Phase 5) is intentionally never called —
+  our own availability is authoritative, so this isn't a gap so much as a deliberate scope decision,
+  but it's worth stating plainly: booking a slot HighLevel itself would consider unavailable (e.g. a
+  meeting created directly in HighLevel, outside this app) is not detected or prevented.
+- No real browser was used — pages were checked via HTTP status and rendered HTML content, same method
+  as every earlier phase.
+
+---
+
 ## Phase 6 — Webhooks + n8n ✅
 
 ### Official docs checked before writing any code (2026-09-22)

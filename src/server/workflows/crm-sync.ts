@@ -14,7 +14,7 @@
  */
 import { desc, eq } from "drizzle-orm";
 import type { Database } from "@/db/client";
-import { contacts, opportunities, pipelineStages } from "@/db/schema";
+import { appointments, contacts, opportunities, pipelineStages } from "@/db/schema";
 import { getEnv, type Env } from "@/lib/env";
 import { PermanentJobError, TransientJobError } from "@/lib/job-errors";
 import { getCrmProvider } from "@/server/integrations/crm";
@@ -44,6 +44,12 @@ function requirePipelineId(env: Env): string {
   if (env.HIGHLEVEL_PIPELINE_ID) return env.HIGHLEVEL_PIPELINE_ID;
   if (env.MOCK_MODE) return "mock-pipeline";
   throw new PermanentJobError("HIGHLEVEL_PIPELINE_ID is not configured");
+}
+
+function requireCalendarId(env: Env): string {
+  if (env.HIGHLEVEL_CALENDAR_ID) return env.HIGHLEVEL_CALENDAR_ID;
+  if (env.MOCK_MODE) return "mock-calendar";
+  throw new PermanentJobError("HIGHLEVEL_CALENDAR_ID is not configured");
 }
 
 // ── Enqueue helpers (call after the triggering transaction commits) ─────────
@@ -174,4 +180,43 @@ export async function handleSyncOpportunity(db: Database, job: Job, workerId: st
 
 export async function handleUpdateOpportunity(db: Database, job: Job, workerId: string): Promise<HandlerResult> {
   return syncOpportunity(db, job, workerId, await resolveOpportunityId(db, job.payload as Record<string, unknown>));
+}
+
+export { CRM_SYNC_APPOINTMENT_JOB } from "@/server/services/appointments";
+
+export async function handleSyncAppointment(db: Database, job: Job, workerId: string): Promise<HandlerResult> {
+  const env = getEnv();
+  const locationId = requireLocationId(env);
+  const calendarId = requireCalendarId(env);
+  const { appointmentId } = job.payload as { appointmentId?: string };
+  if (!appointmentId) throw new PermanentJobError("Job payload is missing appointmentId");
+
+  const [appt] = await db.select().from(appointments).where(eq(appointments.id, appointmentId));
+  if (!appt) throw new PermanentJobError(`Appointment ${appointmentId} no longer exists`);
+  if (appt.status === "cancelled") return { outcome: "skipped", reason: "Appointment was cancelled before it could be synced" };
+  const [c] = await db.select().from(contacts).where(eq(contacts.id, appt.contactId));
+  if (!c) throw new PermanentJobError(`Contact for appointment ${appointmentId} no longer exists`);
+  if (!c.ghlContactId) throw new TransientJobError(`Contact ${c.id} has not been synced to HighLevel yet — retrying until it is`);
+  if (appt.ghlAppointmentId) return { outcome: "skipped", reason: "Already synced (no HighLevel update-appointment endpoint is wired up yet — reschedule/cancel are recorded locally only)" };
+
+  const provider = getCrmProvider(db, (operation) => ({ operation, jobId: job.id, attempt: job.attempts }));
+  const res = await provider.createAppointment({
+    locationId,
+    calendarId,
+    contactId: c.ghlContactId,
+    title: appt.title,
+    startTime: appt.startsAt.toISOString(),
+    endTime: appt.endsAt.toISOString(),
+  });
+  await db.update(appointments).set({ ghlAppointmentId: res.ghlAppointmentId }).where(eq(appointments.id, appointmentId));
+  const actor: Actor = { type: "worker", label: workerId };
+  await writeAudit(db, actor, {
+    eventType: "crm.appointment_synced",
+    entityType: "appointment",
+    entityId: appointmentId,
+    contactId: appt.contactId,
+    message: `Synced to HighLevel (appointment ${res.ghlAppointmentId})`,
+    metadata: { ghlAppointmentId: res.ghlAppointmentId },
+  });
+  return { outcome: "completed", note: `HighLevel appointment ${res.ghlAppointmentId}` };
 }

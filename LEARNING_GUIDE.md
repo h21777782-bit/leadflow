@@ -660,3 +660,80 @@ n8n chala kar, real webhook trigger karke, real bugs fix kiye. Isse pata chalta 
 | Payload mein zaroori field missing | Job "failed", clear error message | Person `/webhooks` pe dekh kar payload fix kare, phir Reprocess |
 | Contact resolve nahi hua (email/phone match nahi) | "No contact found matching..." | Sahi identifier bhejo, ya pehle contact banao |
 | Worker down | Jobs "pending" rehte hain, kabhi lose nahi hote | Worker start karo, sab process ho jaayega |
+
+---
+
+# Phase 7 — Appointment Booking (Hinglish)
+
+## 1. Humne kya banaya — ek line mein
+
+Ek function, `bookAppointment()` — chahe koi UI se book kare ya webhook se (external calendar) — dono EK HI function call karte hain, isliye stage change, follow-up rukna, confirmation message, reminders, rep ko notification, aur HighLevel sync — sab **ek saath** hota hai, kabhi aadha-adhura nahi.
+
+## 2. DST-safe scheduling — sabse tricky wala part
+
+File: `src/lib/scheduling.ts` (pure — koi DB nahi, isliye fast test hota hai)
+
+Rep ke working hours unke **apne** timezone mein hain (e.g. "09:00–17:00" America/New_York mein). Lead ko slots **unke** timezone mein dikhte hain. Problem: saal mein 2 din aise hote hain jab clock aage/peeche hoti hai (DST) — us din 9am se 5pm tak ka "8 ghanta" waqt actually UTC mein 7 ya 9 ghante ka ho sakta hai!
+
+**Solution:** Har din ka start/end time ALAG SE calculate karo us specific date ke liye — `zonedTimeToUtc()` (Phase 1 se already bana hua) har baar us din ka sahi UTC offset nikalta hai. Isliye chahe DST switch ho jaaye, 9am local hamesha 9am local hi rehta hai, sirf UTC time badalta hai.
+
+**Test se proof:** 2026-03-08 (spring forward) aur 2026-11-01 (fall back) — dono transitions pe test likha ki ek working day mein poori 8 slots milti hain, aur pehli slot ka local time (09:00) UTC mein alag hota hai transition ke pehle vs baad — matlab hamara code ye handle karta hai, sirf claim nahi karta.
+
+## 3. Double-booking — do layers of protection
+
+1. **Application layer:** `bookAppointment()` insert karne ki koshish karta hai.
+2. **Database layer (asli guarantee):** Postgres ka `EXCLUDE USING gist` constraint — agar same rep ke do appointments ka time overlap ho (aur dono cancelled na hon), to Postgres **khud** insert reject kar deta hai. Ye drizzle-kit ke schema tool se nahi ban sakta, isliye migration file mein **haath se** likha.
+
+**Kyun dono layers?** Application check race condition mein fail ho sakta hai (do requests EK HI second mein aayein) — lekin database constraint kabhi fail nahi hota, chahe kitni bhi requests ek saath aayein. Test: 2 concurrent booking requests same rep, same time ke liye → hamesha exactly 1 "booked" aur 1 "conflict", kabhi 2 "booked" nahi.
+
+## 4. "One flow" — booking ke baad kya kya hota hai
+
+```
+bookAppointment() call hua
+  → appointment row insert (EXCLUDE constraint safe)
+  → opportunity stage → "appointment_booked" (existing changeStage())
+  → nurture workflow turant ROKO (agla poll wait nahi karna — naya function stopWorkflowForContact())
+  → SIMULATED confirmation email
+  → reminder jobs: 24h pehle + 1h pehle (agar wo time already nikal chuka hai to SKIP — late reminder kabhi nahi)
+  → rep ko SIMULATED notification
+  → lead ka score recalculate (appointment factor badal gaya)
+  → HighLevel calendar sync job queue mein
+```
+
+Sab EK function ke andar — UI form aur webhook dono yehi function call karte hain, isliye kabhi "UI se booking full hui, webhook se adhoori reh gayi" jaisa bug nahi ho sakta.
+
+## 5. Reminders — cancelled slot ke liye kabhi nahi jaate
+
+Do jagah protection:
+1. Cancel karte waqt: sab pending reminder jobs turant "cancelled" ho jaate hain (`cancelPendingJobsForAppointment`).
+2. **Defense in depth:** agar koi reminder job EXACTLY usi second claim ho jaaye jab cancel ho raha hai (race condition), to handler khud appointment ka CURRENT status check karta hai bhejne se pehle — cancelled dikha to seedha skip, message kabhi nahi bhejta.
+
+Test ne dono prove kiya: (a) cancel karne se job "cancelled" ho jaata hai, (b) agar handler ko force se chalaya jaaye ek cancelled appointment ke liye, to bhi wo skip karta hai.
+
+## 6. Ek bug jo sirf `npm run build` ne pakda (tests ne nahi)
+
+Teen server actions (`markNoShowAction` waghera) pehle aise likhe the: `export const x = (...) => ...`. TypeScript khush tha, saare 216 tests pass ho rahe the — lekin `next build` fail ho gaya: "export nahi mila"! Next.js ke Server Actions compiler ko har action **seedha `async function`** chahiye, arrow function wrapper nahi, apne internal action-manifest ke liye.
+
+**Interview mein kaam ki baat:** *"Isliye main hamesha `npm run verify` mein build bhi chalata hoon, sirf typecheck aur tests nahi — kuch bugs SIRF build time pe pakde jaate hain, jaise ye wala."*
+
+## 7. Important files (Phase 7)
+
+| File | Kaam |
+|---|---|
+| `src/lib/scheduling.ts` | DST-safe slot generation (pure, 11 tests) |
+| `drizzle/0004_appointments_booking.sql` | Working hours columns + hand-written EXCLUDE constraint |
+| `src/server/services/appointments.ts` | `bookAppointment`, reschedule, cancel, no-show, completed |
+| `src/server/workflows/appointment-reminders.ts` | 24h/1h reminder handlers |
+| `src/app/(app)/appointments/page.tsx` | Booking form + row actions |
+| `src/components/settings/working-hours-editor.tsx` | Rep working hours editor |
+| `tests/scheduling.test.ts`, `appointments-integration.test.ts` | 21 tests |
+
+## 8. Kya fail ho sakta hai
+
+| Failure | Kaise pata chalta hai | Recovery |
+|---|---|---|
+| Double-booking koshish | Database EXCLUDE constraint reject karta hai | Clean "conflict" message, koi raw error nahi |
+| Contact/rep nahi mila | "not_found" status | Person sahi id check kare |
+| Reminder time already nikal gaya | Job enqueue hi nahi hota | Koi late reminder nahi jaata |
+| Appointment cancel ho gaya reminder se pehle | Job cancelled, ya handler khud skip karta hai | Kabhi galat reminder nahi jaata |
+| Contact HighLevel pe sync nahi hua abhi | `crm.sync_appointment` retry karta hai | Automatic — jab contact sync ho jaaye |

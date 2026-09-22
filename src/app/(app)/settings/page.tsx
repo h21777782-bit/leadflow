@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { connection } from "next/server";
 import { RepEditor } from "@/components/settings/rep-editor";
 import { RuleEditor, type RuleView } from "@/components/settings/rule-editor";
+import { WorkingHoursEditor } from "@/components/settings/working-hours-editor";
 import { Badge } from "@/components/ui/badges";
 import { PageHeader } from "@/components/ui/page-header";
 import { Panel } from "@/components/ui/panel";
@@ -41,7 +42,7 @@ export default async function SettingsPage() {
       <div className="space-y-6 px-8 py-6">
         <Panel title="Sales team" description="Unavailable, inactive or full reps never receive new leads. Making a rep unavailable moves their not-yet-contacted leads; leads already in conversation stay." flush>
           <Table>
-            <thead><tr><Th>Rep</Th><Th>Services / regions</Th><Th className="text-right">Active leads</Th><Th>Availability and capacity</Th></tr></thead>
+            <thead><tr><Th>Rep</Th><Th>Services / regions</Th><Th className="text-right">Active leads</Th><Th>Availability and capacity</Th><Th>Working hours (own timezone)</Th></tr></thead>
             <tbody>
               {reps.map((u) => (
                 <tr key={u.id}>
@@ -56,6 +57,7 @@ export default async function SettingsPage() {
                   </Td>
                   <Td className="tabular text-right">{u.openLeads} / {u.maxOpenLeads}</Td>
                   <Td><RepEditor rep={u} /></Td>
+                  <Td><WorkingHoursEditor rep={u} /></Td>
                 </tr>
               ))}
             </tbody>

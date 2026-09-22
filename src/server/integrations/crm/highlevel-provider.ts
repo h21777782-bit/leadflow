@@ -5,11 +5,12 @@
  */
 import type { Database } from "@/db/client";
 import { highLevelRequest, type CallContext } from "./http-client";
-import type { CrmContactInput, CrmContactResult, CrmOpportunityInput, CrmOpportunityResult, CrmPipeline, CrmProvider, OpportunityStatus } from "./types";
+import type { CrmAppointmentInput, CrmAppointmentResult, CrmContactInput, CrmContactResult, CrmOpportunityInput, CrmOpportunityResult, CrmPipeline, CrmProvider, OpportunityStatus } from "./types";
 
 type UpsertContactResponse = { new: boolean; contact: { id: string } };
 type OpportunityResponse = { opportunity: { id: string } };
 type PipelinesResponse = { pipelines: { id: string; name: string; stages?: { id: string; name: string }[] }[] };
+type AppointmentResponse = { id: string };
 
 export class HighLevelProvider implements CrmProvider {
   readonly name = "highlevel";
@@ -75,5 +76,18 @@ export class HighLevelProvider implements CrmProvider {
       query: { locationId },
     });
     return res.pipelines.map((p) => ({ id: p.id, name: p.name, stages: p.stages ?? [] }));
+  }
+
+  // NOTE: the request shape (method/path/body fields) is confirmed from the docs (Phase 5 doc-check,
+  // marketplace.gohighlevel.com/docs/ghl/calendars/create-appointment/). The exact response field name
+  // was NOT captured in that check — `id` is HighLevel's usual convention, but this specific field is
+  // UNVERIFIED against a real response. See IMPLEMENTATION_LOG.md, Phase 7.
+  async createAppointment(input: CrmAppointmentInput): Promise<CrmAppointmentResult> {
+    const res = await highLevelRequest<AppointmentResponse>(this.db, this.ctx("calendars.create_appointment"), {
+      method: "POST",
+      path: "/calendars/events/appointments",
+      body: { calendarId: input.calendarId, locationId: input.locationId, contactId: input.contactId, title: input.title, startTime: input.startTime, endTime: input.endTime },
+    });
+    return { ghlAppointmentId: res.id };
   }
 }

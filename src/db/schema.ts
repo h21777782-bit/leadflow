@@ -15,6 +15,7 @@
  */
 import { sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   boolean,
   index,
   integer,
@@ -62,6 +63,10 @@ export const users = pgTable("users", {
   isAvailable: boolean("is_available").notNull().default(true), // e.g. on leave
   maxOpenLeads: integer("max_open_leads").notNull().default(25),
   lastAssignedAt: timestamp("last_assigned_at", { withTimezone: true }),
+  // Working hours (Phase 7), in the rep's OWN timezone (the `timezone` column above) — "09:00"/"17:00".
+  workingHoursStart: text("working_hours_start").notNull().default("09:00"),
+  workingHoursEnd: text("working_hours_end").notNull().default("17:00"),
+  workingDays: integer("working_days").array().notNull().default(sql`'{1,2,3,4,5}'::integer[]`), // 0=Sun..6=Sat
   createdAt: createdAt(),
 });
 
@@ -264,6 +269,8 @@ export const jobs = pgTable(
     opportunityId: uuid("opportunity_id").references(() => opportunities.id, { onDelete: "set null" }),
     workflowRunId: uuid("workflow_run_id").references(() => workflowRuns.id, { onDelete: "set null" }),
     contactId: uuid("contact_id").references(() => contacts.id, { onDelete: "cascade" }),
+    // Phase 7: reminder jobs reference their appointment, so cancelling/rescheduling one can find and cancel them.
+    appointmentId: uuid("appointment_id").references((): AnyPgColumn => appointments.id, { onDelete: "cascade" }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -274,6 +281,7 @@ export const jobs = pgTable(
     index("jobs_lease_idx").on(t.status, t.leaseExpiresAt),
     index("jobs_run_idx").on(t.workflowRunId),
     index("jobs_contact_idx").on(t.contactId),
+    index("jobs_appointment_idx").on(t.appointmentId),
   ],
 );
 

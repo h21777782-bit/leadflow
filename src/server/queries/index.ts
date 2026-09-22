@@ -257,6 +257,7 @@ export async function listAppointments(now = new Date()) {
       status: s.appointments.status,
       contactId: s.contacts.id,
       contactName: sql<string>`trim(${s.contacts.firstName} || ' ' || coalesce(${s.contacts.lastName}, ''))`,
+      ownerId: s.appointments.ownerId,
       ownerName: owner.name,
       ownerTimezone: owner.timezone,
     })
@@ -464,4 +465,22 @@ export async function listAssignableUsers() {
     .from(s.users)
     .where(eq(s.users.role, "sales_rep"))
     .orderBy(asc(s.users.name));
+}
+
+/** Reps with their working hours, for the booking form (Phase 7). */
+export async function listRepsForBooking() {
+  return getDb()
+    .select({ id: s.users.id, name: s.users.name, timezone: s.users.timezone, isAvailable: s.users.isAvailable, workingHoursStart: s.users.workingHoursStart, workingHoursEnd: s.users.workingHoursEnd, workingDays: s.users.workingDays })
+    .from(s.users)
+    .where(eq(s.users.role, "sales_rep"))
+    .orderBy(asc(s.users.name));
+}
+
+/** Minimal contact list for the booking form's contact picker (Phase 7). */
+export async function listContactOptions() {
+  return getDb()
+    .select({ id: s.contacts.id, name: sql<string>`trim(${s.contacts.firstName} || ' ' || coalesce(${s.contacts.lastName}, ''))`, timezone: s.contacts.timezone, ownerId: s.contacts.ownerId })
+    .from(s.contacts)
+    .orderBy(desc(s.contacts.createdAt))
+    .limit(200);
 }

@@ -94,7 +94,7 @@ message listing every invalid variable. Secrets are never shown in the UI.
 | `HIGHLEVEL_PRIVATE_TOKEN` | when `MOCK_MODE=false` | Private Integration token (sub-account level) |
 | `HIGHLEVEL_LOCATION_ID` | when `MOCK_MODE=false` | Sub-account (location) id — ignored by the mock provider |
 | `HIGHLEVEL_PIPELINE_ID` | when `MOCK_MODE=false` | The single pipeline opportunities sync into |
-| `HIGHLEVEL_CALENDAR_ID` | Phase 7 | |
+| `HIGHLEVEL_CALENDAR_ID` | when `MOCK_MODE=false` | The calendar appointments sync into (`crm.sync_appointment` job) |
 | `HIGHLEVEL_API_BASE_URL` | no | Defaults to `https://services.leadconnectorhq.com` |
 | `HIGHLEVEL_API_VERSION` | no | Defaults to `v3` (sent as the `Version` header) — see `IMPLEMENTATION_LOG.md`, Phase 5, for the doc-check behind this default |
 | `HIGHLEVEL_HTTP_TIMEOUT_MS` | no (`10000`) | Real HighLevel calls are aborted and treated as a transient failure past this |
@@ -166,8 +166,16 @@ a no-op that replays the original result. An importable n8n workflow
 (`n8n/leadflow-lead-intake.json`) was built and **actually run** against a local n8n in Docker,
 signing and posting to a real running instance of this app — see `IMPLEMENTATION_LOG.md`, Phase 6.
 
-Planned (later phases): appointment booking (availability, reminders, reschedule/cancel — Phase 6
-only records what a webhook reports), ops/reporting screens, auth.
+Built as of Phase 7: appointment booking is one function, `bookAppointment()` — the UI's booking
+form and the `/api/webhooks/appointments` webhook both call it, so a lead's stage, follow-ups,
+confirmation message, 24h/1h reminder jobs, rep notification, score, and HighLevel calendar sync
+all happen together, never partially. Rep working hours are wall-clock time in the **rep's own**
+timezone; slots are generated DST-safe (built on Phase 1's `src/lib/timezone.ts`, not a new date
+library) and shown in the **lead's** timezone. Double-booking is impossible even under
+concurrency — not just checked in application code, but refused by a Postgres `EXCLUDE` constraint
+on `appointments`, verified with a real concurrent-request test.
+
+Planned (later phases): ops/reporting screens, a demo scenario page, auth.
 
 ### Folder map
 
@@ -180,12 +188,12 @@ src/
   db/schema.ts           full database schema (all phases)
   db/seed-data.ts        demo dataset (pure data, unit-tested)
   db/seed.ts             transactional seed routine
-  lib/                   env validation, normalization, timezone, pipeline constants, backoff, job-errors, webhook-signature
+  lib/                   env validation, normalization, timezone, scheduling (DST-safe slots), pipeline constants, backoff, job-errors, webhook-signature
   server/http/           shared webhook route handler (auth, size limit, dispatch) behind app/api/webhooks/*
   server/queries/        read-side data access used by pages
   server/queue/          job queue (enqueue, claim, complete/fail, recovery)
   server/worker/         worker runtime (handler registry, poll loop)
-  server/workflows/      nurture (follow-up), crm-sync (outbox) and webhook-process workflows
+  server/workflows/      nurture (follow-up), crm-sync (outbox), webhook-process, and appointment-reminders workflows
   server/integrations/   messaging + CRM provider interfaces, mock implementations, real HighLevel client
   server/services/       business rules, incl. payments (payment → won), appointments, notifications (Phase 6)
 scripts/                 migrate / seed / worker / demo / webhook:send CLIs

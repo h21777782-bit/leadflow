@@ -19,7 +19,7 @@ import type { Database } from "@/db/client";
 import { PermanentJobError, TransientJobError } from "@/lib/job-errors";
 import { getSetting } from "@/server/services/app-settings";
 import { logIntegrationCall, type CallContext } from "./http-client";
-import type { CrmContactInput, CrmContactResult, CrmOpportunityInput, CrmOpportunityResult, CrmPipeline, CrmProvider } from "./types";
+import type { CrmAppointmentInput, CrmAppointmentResult, CrmContactInput, CrmContactResult, CrmOpportunityInput, CrmOpportunityResult, CrmPipeline, CrmProvider } from "./types";
 
 export const CRM_FAILURE_SWITCH_KEY = "demo.mock_crm_failure_mode";
 export type CrmFailureMode = "off" | "429" | "503" | "timeout" | "401";
@@ -90,5 +90,9 @@ export class MockCrmProvider implements CrmProvider {
         ],
       },
     ]);
+  }
+
+  async createAppointment(input: CrmAppointmentInput): Promise<CrmAppointmentResult> {
+    return this.run("calendars.create_appointment", () => ({ ghlAppointmentId: hashId("mock_appt", `${input.contactId}:${input.startTime}`) }));
   }
 }

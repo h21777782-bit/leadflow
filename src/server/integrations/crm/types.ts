@@ -1,8 +1,9 @@
 /**
  * CRM provider contract (HighLevel today, could be another CRM later).
  * Field names match what marketplace.gohighlevel.com/docs documents for
- * /contacts/upsert, /opportunities/, /opportunities/:id/status and
- * /opportunities/pipelines — see IMPLEMENTATION_LOG.md, Phase 5.
+ * /contacts/upsert, /opportunities/, /opportunities/:id/status,
+ * /opportunities/pipelines, /calendars/:id/free-slots and
+ * /calendars/events/appointments — see IMPLEMENTATION_LOG.md, Phases 5 and 7.
  */
 export type CrmContactInput = {
   locationId: string;
@@ -33,6 +34,16 @@ export type CrmOpportunityResult = { ghlOpportunityId: string };
 export type CrmPipelineStage = { id: string; name: string };
 export type CrmPipeline = { id: string; name: string; stages: CrmPipelineStage[] };
 
+export type CrmAppointmentInput = {
+  locationId: string;
+  calendarId: string;
+  contactId: string; // the HighLevel contact id
+  title: string;
+  startTime: string; // ISO 8601
+  endTime: string; // ISO 8601
+};
+export type CrmAppointmentResult = { ghlAppointmentId: string };
+
 export interface CrmProvider {
   readonly name: string;
   upsertContact(input: CrmContactInput): Promise<CrmContactResult>;
@@ -40,4 +51,6 @@ export interface CrmProvider {
   upsertOpportunity(input: CrmOpportunityInput & { existingGhlOpportunityId?: string | null }): Promise<CrmOpportunityResult>;
   updateOpportunityStatus(input: { ghlOpportunityId: string; status: OpportunityStatus; lostReasonId?: string | null }): Promise<{ ok: true }>;
   getPipelines(locationId: string): Promise<CrmPipeline[]>;
+  /** Phase 7 — not used for slot generation (that's our own, DST-safe `src/lib/scheduling.ts`); only for creating the synced event. */
+  createAppointment(input: CrmAppointmentInput): Promise<CrmAppointmentResult>;
 }

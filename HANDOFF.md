@@ -3,8 +3,8 @@
 Exact state of LeadFlow at handoff. Any AI assistant or developer continuing this
 project should read this file, then `IMPLEMENTATION_LOG.md`.
 
-**Updated 2026-09-23:** Phase 6 is now complete (webhooks + n8n). Phases 4 and 5 were completed
-2026-09-22 — see `IMPLEMENTATION_LOG.md` for all three.
+**Updated 2026-09-23:** Phase 7 is now complete (appointment booking). Phase 6 (webhooks + n8n) was
+also completed 2026-09-23; Phases 4 and 5 were completed 2026-09-22 — see `IMPLEMENTATION_LOG.md`.
 
 ## Phase status
 
@@ -15,20 +15,28 @@ project should read this file, then `IMPLEMENTATION_LOG.md`.
 | 3 Lead scoring + smart routing | ✅ complete, committed |
 | 4 Automation engine, follow-ups, retries | ✅ **complete** — engine, UI, 26 integration tests, 3 demo scripts, docs |
 | 5 HighLevel integration | ✅ **complete** — CrmProvider (mock + real), outbox sync, 11 integration tests, demo script, docs |
-| **6 Webhooks + n8n** | ✅ **complete** — 6 signed endpoints, Webhook Events UI, n8n workflow actually run in Docker, 26 tests, docs |
-| 7 Appointment booking | ⏳ not started (Phase 6 built a minimal webhook-driven appointment upsert only — no availability/reminders/reschedule) |
+| 6 Webhooks + n8n | ✅ **complete** — 6 signed endpoints, Webhook Events UI, n8n workflow actually run in Docker, 26 tests, docs |
+| **7 Appointment booking** | ✅ **complete** — DST-safe slots, DB-enforced no-overlap, one booking flow (stage/workflow/confirm/reminders/notify/rescore/sync), reschedule/cancel/no-show/completed, 21 tests, docs |
 | 8 Ops screens, reporting, demo page, auth | ⏳ not started |
 | 9 Final docs, FAILURE_STORY, deployment guide | ⏳ not started |
 
 ## Verified at handoff (actually run)
 
-- `npm run verify` → typecheck ✓, lint 0 warnings ✓, **195 tests passed (15 files)**, production build ✓
-  (169 carried over from Phase 5 + 13 webhook-signature + 13 webhooks-integration tests).
+- `npm run verify` → typecheck ✓, lint 0 warnings ✓, **216 tests passed (17 files)**, production build ✓
+  (195 carried over from Phase 6 + 11 scheduling + 10 appointments-integration tests).
 - Migration `0002_automation_engine.sql` applied on a **copy of real data** (Phase 4 detail — old job
-  statuses renamed in place, no rows lost). Migration `0003_webhooks_n8n.sql` (Phase 6) is purely
-  additive (new `notifications` table + `webhook_events.job_id`) — no data migration needed.
+  statuses renamed in place, no rows lost). Migrations `0003_webhooks_n8n.sql` (Phase 6) and
+  `0004_appointments_booking.sql` (Phase 7) are additive — the latter also hand-adds a Postgres
+  `EXCLUDE` constraint (drizzle-kit's schema DSL can't express one) that makes double-booking
+  impossible at the database level; verified with raw SQL before any app code was written against it.
 - `npm run demo:a`, `npm run demo:b`, `npm run demo:c`, `npm run demo:crm` all run to completion
-  against the dev DB.
+  against the dev DB. Phase 7 has no dedicated demo script (not requested) but was verified live via
+  two throwaway smoke-test scripts (deleted after use) — see `IMPLEMENTATION_LOG.md`, Phase 7.
+- **`npm run build` caught a real bug neither typecheck nor 216 passing tests caught**: three
+  appointment server actions were first written as `export const x = (...) => ...` inside a
+  `"use server"` file; Next's Server Actions compiler requires a plain `async function` declaration
+  for its action manifest and failed only at build time. Fixed; noted in `IMPLEMENTATION_LOG.md`,
+  Phase 7, as a reminder that `npm run verify`'s build step is not redundant with typecheck/tests.
 - Real two-process test (Phase 4): production web server + a separate `npm run worker` process, a lead
   created through a genuine HTTP POST to the web server, completed by the *other* process, visible on
   the dashboard the web process serves. Full write-up in `IMPLEMENTATION_LOG.md`, Phase 4.
@@ -85,10 +93,23 @@ project should read this file, then `IMPLEMENTATION_LOG.md`.
 | `src/server/http/webhook-route.ts` | Shared handler behind all 6 routes: size limit → signature (before any DB write) → parse → idempotency key → dispatch |
 | `src/app/api/webhooks/{leads,contacts,opportunities,appointments,payments,messages}/route.ts` | Six one-line routes |
 | `src/server/services/webhooks.ts`, `src/server/workflows/webhook-process.ts` | Idempotent receive + enqueue (`webhook_events` UNIQUE(source,event_id)), and the `webhook.process` job that dispatches to existing services (contacts/opportunities/messages) or two new ones (payments, appointments) |
-| `src/server/services/payments.ts`, `appointments.ts`, `notifications.ts` | Payment → Won + onboarding checklist (idempotent on `externalPaymentId`); minimal webhook-driven appointment upsert; SIMULATED rep notification on reply |
+| `src/server/services/payments.ts`, `notifications.ts` | Payment → Won + onboarding checklist (idempotent on `externalPaymentId`); SIMULATED rep notification on reply (and, since Phase 7, on appointment booked) |
 | `src/app/(app)/webhooks/page.tsx` + actions/components | Webhook Events screen: payload, signature result, status, result/error, linked job, Reprocess button |
 | `scripts/webhook-send.ts` (`npm run webhook:send`), `n8n/leadflow-lead-intake.json` | Signed test sender + curl examples; n8n workflow **actually run** in Docker (see IMPLEMENTATION_LOG.md for the 4 real bugs found and fixed) |
 | `tests/webhook-signature.test.ts` (13), `tests/webhooks-integration.test.ts` (13) | Signature edge cases; duplicate/concurrent delivery, invalid payload, reprocess, payment→won against real Postgres |
+
+## Phase 7 — what exists
+
+| File | What it does |
+|---|---|
+| `src/lib/scheduling.ts` | DST-safe slot generation, pure, 11 tests (both 2026 US DST transitions) |
+| `drizzle/0004_appointments_booking.sql` | `users` working-hours columns, `jobs.appointment_id`, and a hand-added Postgres `EXCLUDE` constraint that makes double-booking impossible at the DB level |
+| `src/server/services/appointments.ts` (rewritten) | `bookAppointment()` — the one flow (stage, stop workflow, confirm, reminders, notify, rescore, CRM sync); `rescheduleAppointment`, `cancelAppointment`, `markNoShow`/`markCompleted`/`confirmAppointment`, `getAvailableSlots`; `upsertAppointmentFromWebhook` now calls `bookAppointment`/`rescheduleAppointment` — the webhook and the UI form are the same code path |
+| `src/server/workflows/appointment-reminders.ts` | 24h/1h reminder job handlers — reload appointment status before sending, never send for a cancelled slot |
+| `src/server/integrations/crm/*` (extended) | `CrmProvider.createAppointment()`, `crm.sync_appointment` job |
+| `src/app/actions/appointments.ts`, `src/components/appointments/*`, `src/app/(app)/appointments/page.tsx` (rewritten) | Booking form (slot search + pick + book, both timezones shown), row actions (Confirm/Reschedule/Complete/No-show/Cancel) |
+| `src/components/settings/working-hours-editor.tsx` | Per-rep working hours on the Settings page |
+| `tests/scheduling.test.ts` (11), `tests/appointments-integration.test.ts` (10) | DST, concurrent double-booking, reminder-skipped-after-cancel, idempotent booking webhook |
 
 ## Known limitations carried over
 
@@ -103,8 +124,13 @@ project should read this file, then `IMPLEMENTATION_LOG.md`.
   regardless of which signature scheme authenticated the request — a real HighLevel webhook's native
   `data` envelope (`ContactCreate`/`ContactUpdate`/etc. field names) is not mapped into it. Only the
   `X-GHL-Signature` verification itself was checked against real HighLevel docs and a real key format.
-- The appointments webhook does a minimal upsert only — no availability checking, double-booking
-  prevention, reminders, or reschedule/cancel flows. That's Phase 7.
+- `HighLevelProvider.createAppointment()`'s response field (`res.id`) is HighLevel's usual convention
+  but was not confirmed against a real response in the Phase 5 doc-check — UNVERIFIED, flagged in code.
+- Booking deliberately never calls HighLevel's own `free-slots` endpoint — our own DST-safe
+  `src/lib/scheduling.ts` is the single source of truth for availability, so a meeting created directly
+  in HighLevel (outside this app) would not be detected or prevented here.
+- No admin auth yet (Phase 8) means the booking form, working-hours editor, and appointment actions are
+  all open to anyone who can reach the app, same as every other write path in this demo.
 
 ## How to run
 
