@@ -89,7 +89,18 @@ export default async function GetStartedPage({ searchParams }: PageProps<"/get-s
               </label>
               <label className="block text-[13px]">
                 <span className="mb-1 block font-medium">Phone (optional)</span>
-                <input type="tel" name="phone" className="w-full rounded-md border border-line-strong bg-surface px-3 py-2" />
+                <input type="tel" name="phone" placeholder="e.g. 98765 43210" className="w-full rounded-md border border-line-strong bg-surface px-3 py-2" />
+              </label>
+              <label className="block text-[13px]">
+                <span className="mb-1 block font-medium">Country (2-letter code)</span>
+                <input
+                  name="country"
+                  maxLength={2}
+                  placeholder="IN"
+                  defaultValue="IN"
+                  className="w-full rounded-md border border-line-strong bg-surface px-3 py-2 uppercase"
+                />
+                <span className="mt-1 block text-xs text-faint">Needed to validate a local phone number without a +country code.</span>
               </label>
               <label className="block text-[13px]">
                 <span className="mb-1 block font-medium">Company</span>

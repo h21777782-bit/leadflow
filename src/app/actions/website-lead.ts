@@ -33,6 +33,7 @@ export async function submitWebsiteLeadAction(fd: FormData): Promise<void> {
     lastName: String(fd.get("lastName") ?? ""),
     email: String(fd.get("email") ?? ""),
     phone: String(fd.get("phone") ?? ""),
+    country: String(fd.get("country") ?? "") || undefined,
     company: String(fd.get("company") ?? ""),
     leadSource: "website_form",
     serviceInterest: String(fd.get("serviceInterest") ?? "") || undefined,
@@ -59,7 +60,9 @@ export async function submitWebsiteLeadAction(fd: FormData): Promise<void> {
   const result = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    const detail = typeof result.error === "string" ? result.error : `Request failed (${res.status})`;
+    const base = typeof result.error === "string" ? result.error : `Request failed (${res.status})`;
+    const fieldErrors = result.errors && typeof result.errors === "object" ? Object.entries(result.errors as Record<string, string>) : [];
+    const detail = fieldErrors.length ? `${base}: ${fieldErrors.map(([field, msg]) => `${field} — ${msg}`).join("; ")}` : base;
     redirect(`/get-started?error=${encodeURIComponent(detail)}`);
   }
   if (result.status === "duplicate") {
