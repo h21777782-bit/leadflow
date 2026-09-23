@@ -8,7 +8,9 @@ import { getEnv } from "@/lib/env";
  * `/api/webhooks/*` is deliberately excluded — those stay protected by their own
  * HMAC/Ed25519 signature checks (see webhook-signature.ts), not a login, since
  * HighLevel/n8n can't hold a browser session. `/api/health` stays open for uptime
- * monitors. When ADMIN_PASSWORD isn't set, the app is intentionally open (local dev).
+ * monitors. `/get-started` is the public "company website" lead-capture form — it
+ * would defeat the point of a public intake form to hide it behind the admin login.
+ * When ADMIN_PASSWORD isn't set, the app is intentionally open (local dev).
  */
 let warnedOpen = false;
 
@@ -31,5 +33,5 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!api/webhooks|api/health|login|_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!api/webhooks|api/health|login|get-started|_next/static|_next/image|favicon.ico).*)"],
 };

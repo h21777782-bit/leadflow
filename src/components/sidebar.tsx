@@ -91,6 +91,12 @@ export function Sidebar({ mode, failedCount, loginEnabled }: { mode: "mock" | "l
         ))}
       </nav>
 
+      <div className="border-t border-white/10 px-5 py-3 text-xs">
+        <a href="/get-started" target="_blank" rel="noopener noreferrer" className="text-faint hover:text-white hover:underline">
+          ↗ Public intake form (demo)
+        </a>
+      </div>
+
       <div className="border-t border-white/10 px-5 py-4 text-xs">
         {mode === "mock" ? (
           <p>
