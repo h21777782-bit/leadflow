@@ -3,9 +3,8 @@
 Exact state of LeadFlow at handoff. Any AI assistant or developer continuing this
 project should read this file, then `IMPLEMENTATION_LOG.md`.
 
-**Updated 2026-09-23:** Phase 8 is now complete (failed-automation tooling, dashboard reporting, the
-`/demo` page, admin login, and real Playwright browser tests). Phase 7 (appointment booking) and
-everything before it was completed earlier the same day — see `IMPLEMENTATION_LOG.md`.
+**Updated 2026-09-23:** Phase 9 is now complete — **the entire 9-phase project is done.**
+Everything is built, tested, documented, and interview-ready; nothing has been deployed.
 
 ## Phase status
 
@@ -18,8 +17,8 @@ everything before it was completed earlier the same day — see `IMPLEMENTATION_
 | 5 HighLevel integration | ✅ **complete** — CrmProvider (mock + real), outbox sync, 11 integration tests, demo script, docs |
 | 6 Webhooks + n8n | ✅ **complete** — 6 signed endpoints, Webhook Events UI, n8n workflow actually run in Docker, 26 tests, docs |
 | 7 Appointment booking | ✅ **complete** — DST-safe slots, DB-enforced no-overlap, one booking flow (stage/workflow/confirm/reminders/notify/rescore/sync), reschedule/cancel/no-show/completed, 21 tests, docs |
-| **8 Failed-automation tooling, reporting, demo page, admin login, real browser tests** | ✅ **complete** — filters/bulk retry, 3 dashboard reporting queries, `/demo` scenario page, shared-password admin login (`src/proxy.ts`), a real no-JS-hang bug found and fixed, 5 Playwright browser tests, docs |
-| 9 Final docs, FAILURE_STORY, deployment guide | ⏳ not started |
+| 8 Failed-automation tooling, reporting, demo page, admin login, real browser tests | ✅ **complete** — filters/bulk retry, 3 dashboard reporting queries, `/demo` scenario page, shared-password admin login (`src/proxy.ts`), a real no-JS-hang bug found and fixed, 5 Playwright browser tests, docs |
+| **9 Final docs, FAILURE_STORY, deployment guide, interview prep** | ✅ **complete** — doc audit (2 stale claims found/fixed), full `README.md` rewrite with a Mermaid architecture diagram, `INTERVIEW_GUIDE.md` top-level material (2-min/5-min/20-Q&A/"what would you improve"), `FAILURE_STORY.md` (real captured demo output), `DEPLOYMENT.md`, a fresh-DB two-process web+worker verification |
 
 ## Verified at handoff (actually run)
 
@@ -68,6 +67,25 @@ everything before it was completed earlier the same day — see `IMPLEMENTATION_
   server — not just written. Found and fixed 4 real bugs in the process (wrong n8n HTTP node
   parameter, env/module sandboxing, a Set node dropping fields) — see `IMPLEMENTATION_LOG.md`, Phase 6.
   The container was removed after verification; it's not part of the ongoing dev setup.
+- **Phase 9's final full run**, in order: fresh `npm run db:migrate` + `npm run db:seed`, then
+  `npm run verify` (typecheck ✓, lint 0 warnings ✓, **225/225 tests, 18 files** ✓, build ✓) on the
+  freshly reseeded database, then a **real two-process test repeating Phase 4's method on the
+  current codebase**: `next start` (production build) on a separate port + `npm run worker` as two
+  genuinely independent OS processes, a real signed HMAC webhook POST to the production server
+  (`npm run webhook:send -- leads --url http://localhost:3700`), and confirmation via direct
+  `psql` queries + the worker's own log timestamps that the **worker process** — not the web
+  server — claimed and completed all three resulting jobs (CRM sync × 2, then the follow-up once
+  its delay elapsed), with the result visible back on the web server's own contact page. Both
+  extra processes were stopped and the database reseeded once more afterward.
+- `npm run demo:crm` was re-run for `FAILURE_STORY.md` and initially **failed** — a real,
+  reproduced fragility (not a product bug): hours of manual testing this session had left many
+  unrelated jobs due, and the demo script's own job lost the race for a `WORKER_BATCH_SIZE` (5)
+  batch slot. Fixed by reseeding first; documented in `DEMO_COMMANDS.md` §15 and
+  `IMPLEMENTATION_LOG.md`, Phase 9, so it doesn't surprise anyone demoing after a long session.
+- Audited `README.md`, `HANDOFF.md`, and `DEMO_COMMANDS.md` for stale/overclaiming statements:
+  found and fixed a README status line stuck at "Phase 3 of 9" and a `DEMO_COMMANDS.md` test
+  count stuck at 158 (real count: 225) — both genuinely stale, not accuracy problems with any
+  technical claim.
 
 ## Phase 4 — what exists
 
@@ -141,6 +159,17 @@ everything before it was completed earlier the same day — see `IMPLEMENTATION_
 | `src/app/actions/lead-intelligence.ts` (fixed) | `logReplyAction`/`updateRepAction`/`saveRuleAction` now redirect on success instead of hanging for no-JS submissions |
 | `playwright.config.ts`, `e2e/*.spec.ts` | 5 real-browser tests (Kanban DnD, contact form, Retry now, demo page) |
 | `tests/admin-session.test.ts` (9) | Sign/verify/expiry/tamper unit tests for the login cookie |
+
+## Phase 9 — what exists
+
+No new application code (the brief explicitly said not to add features) — documentation only.
+
+| File | What it does |
+|---|---|
+| `README.md` (full rewrite) | Mermaid architecture diagram, corrected 22-table schema reference, phase-by-phase feature summary, consolidated "Known limitations" |
+| `INTERVIEW_GUIDE.md` (extended) | New top-level: 2-min pitch, 5-min walkthrough, "why each technology", 20-question quick reference, "what would you improve" — existing phase-by-phase deep dive kept intact below it |
+| `FAILURE_STORY.md` (new) | Real captured `npm run demo:crm` output — simulated HighLevel outage → retry → recovery, with a reproduce-it-yourself section |
+| `DEPLOYMENT.md` (new) | Step-by-step Vercel + Supabase + Railway guide, pooler settings, costs to check, explicit "won't deploy without asking" list |
 
 ## Known limitations carried over
 

@@ -30,7 +30,8 @@ npm run verify
 ```
 
 Shows, in order: route types generated, `tsc` clean, ESLint 0 warnings,
-**158 tests passed**, production build with every data page marked `ƒ (Dynamic)`.
+**225 tests passed**, production build with every data page marked `ƒ (Dynamic)`.
+(`npm run e2e` separately runs 5 Playwright browser tests against a running dev server.)
 
 ## 2. Run the app
 
@@ -493,3 +494,11 @@ page (create + reset). Each test creates its own uniquely-named data and cleans 
 ```bash
 npm run db:seed        # restores the exact demo dataset
 ```
+
+**Do this before demoing `npm run demo:crm` (or any `demo:*` script) if you've been poking around
+the app manually first.** Found the hard way while writing `FAILURE_STORY.md`: the demo scripts
+call `runOnce()`, which claims up to `WORKER_BATCH_SIZE` (5) due jobs at a time — if enough
+*other*, unrelated jobs are already due (leftover from manual testing, e2e runs, etc.), the
+script's own job can lose the race for a batch slot and the demo fails with a confusing
+"expected retry_scheduled, got pending" error. Not a product bug — a fresh `npm run db:seed`
+always leaves the queue nearly empty, which is the state every demo script actually assumes.

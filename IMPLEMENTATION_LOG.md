@@ -5,6 +5,110 @@ Newest phase at the top.
 
 ---
 
+## Phase 9 — Final docs, failure story, deployment guide, interview prep ✅
+
+No new application code — this phase is documentation, an audit of every earlier claim, and a
+final full verification run, per the finishing prompt's explicit "do not add new features."
+
+### Audit of earlier docs — what was found and fixed
+
+Read through `README.md`, `HANDOFF.md`, `DEMO_COMMANDS.md`, and grepped all docs for common
+overclaiming patterns (`always works`, `guaranteed`, `production-ready`, stale "not yet built"
+statements, mismatched test counts). Two real staleness issues found and fixed, both benign
+(no false technical claims, just outdated numbers/status left over from earlier phases):
+
+1. `README.md` still said **"Status: Phase 3 of 9 complete"** and "Automations/worker, retries,
+   webhooks and HighLevel are not built yet" — true when written, badly stale five phases later.
+   Fixed as part of the full rewrite below.
+2. `DEMO_COMMANDS.md` §1 claimed `npm run verify` shows **"158 tests passed"** — a leftover
+   number from an earlier phase, not updated as the suite grew to 225. Fixed to the current count.
+
+Everything else checked out: every "UNVERIFIED" / "not verified this phase" label already in
+`IMPLEMENTATION_LOG.md` was still accurate, and no claim was found asserting something works
+without a cited test or a described live verification.
+
+### FAILURE_STORY.md — actually run, not narrated
+
+The brief asked for a *reproducible* simulated-outage demonstration. Ran `npm run demo:crm`
+against a freshly seeded database and used its real captured output verbatim — the script
+enqueues a real `crm.sync_contact` job, flips the mock provider's fault-injection switch to 503,
+runs the actual worker code (`runOnce`) which fails and schedules a retry with backoff, flips the
+switch off, and the same job completes on its own retry schedule. `FAILURE_STORY.md` includes the
+literal terminal transcript, not a paraphrase.
+
+**One real, reproducible fragility found while doing this**: the script failed the first time it
+was run this session, with "Expected retry_scheduled, got pending". Root cause: this session's
+Postgres had accumulated a lot of leftover due jobs from hours of earlier manual testing
+(curl-based webhook tests, Playwright runs, manual retries) — `runOnce()` claims at most
+`WORKER_BATCH_SIZE` (5) due jobs per call, and the demo's own job lost the race for a batch slot
+to unrelated jobs. Not a product bug — every demo script assumes a queue that's near-empty, which
+is exactly the state `npm run db:seed` leaves it in. Fixed by reseeding before re-running, and
+added a note to `DEMO_COMMANDS.md` §15 so this doesn't surprise anyone demoing after a long
+hands-on session.
+
+### DEPLOYMENT.md — guide only, nothing deployed
+
+Vercel (web) + Supabase (Postgres, with the transaction-pooler-vs-session-pooler distinction and
+`DATABASE_PREPARE` explained) + Railway (worker, always-on process) — expands on the "Deployment
+notes" already written in this log's Phase 4 entry into full step-by-step instructions, plus a
+costs-to-check section and an explicit list of what won't happen without asking first (no account
+creation, no provisioning, no real HighLevel credentials in a deployed environment).
+
+### README.md — full rewrite
+
+New Mermaid architecture diagram (web app / worker / Postgres / external systems, with the
+request-flow and why-Postgres-for-the-queue reasoning inline), a corrected 22-table schema
+reference (the old README said "16 tables" — genuinely stale, last accurate around Phase 4; the
+real count was checked directly against `src/db/schema.ts`, not assumed), a phase-by-phase
+feature summary table, and a consolidated "Known limitations" section pulling together what was
+previously scattered across several phases' "not verified" notes.
+
+### INTERVIEW_GUIDE.md — top-level material added
+
+Added, ahead of the existing phase-by-phase deep dive (kept intact — it's real depth for when a
+question goes further than the quick-reference answers): a whole-project 2-minute pitch, a
+5-minute technical walkthrough usable as a live-demo script, a "why each technology was chosen"
+section, a 20-question quick-reference list, and an honest "what would you improve" section
+(6 items, ordered by what would actually be prioritized first — per-user auth over the shared
+admin password is #1).
+
+### Final full run (all actually executed, in this order)
+
+1. `npm run db:migrate` — applied cleanly against the existing dev database (idempotent; no
+   pending migrations).
+2. `npm run db:seed` — wiped and reloaded the standard 24-lead demo dataset (fixed counts: 6
+   users, 24 contacts/opportunities, 10 appointments, 273 audit log rows, etc.) — this is also
+   what fixed the `demo:crm` fragility above.
+3. `npm run verify` (typecheck → lint → test → build) — **typecheck ✓, lint 0 warnings ✓, 225/225
+   tests passed (18 files), production build ✓** — same clean result as every phase this session,
+   re-confirmed on the freshly reseeded database.
+4. **Real two-process web+worker integration test**, repeating Phase 4's original verification
+   method on the current, much larger codebase: started `next start` (production build) on port
+   3700 and `npm run worker` as two genuinely separate OS processes, then sent a real signed HMAC
+   webhook (`npm run webhook:send -- leads --url http://localhost:3700`) to the production server.
+   Got a `202 Accepted` with a new contact/opportunity id. Confirmed via direct `psql` queries and
+   the worker's own log timestamps that the **separate worker process** — not the web server —
+   claimed and completed all three resulting jobs (`crm.sync_contact`, `crm.sync_opportunity`,
+   and, once its configured delay elapsed, `workflow.send_followup`), and that the production web
+   server's own contact page reflected the worker's results ("Synced to HighLevel" visible) —
+   proving the two processes only ever coordinated through Postgres, genuinely independently.
+   Both extra processes were stopped afterward; the database was reseeded once more to a clean
+   state.
+
+### Not verified this phase (stated honestly)
+
+- No real HighLevel account, no real deployment — both explicitly out of scope for this phase
+  (the brief says "do not add new features" and "ask before deploying"), and both already listed
+  as known limitations carried from earlier phases.
+- The audit pass was a targeted grep-and-read for overclaiming patterns and stale numbers, not a
+  line-by-line re-verification of every single sentence in five large documents — a genuinely
+  exhaustive audit of that size wasn't what the time available for this phase supported. The two
+  issues it did find (stale README status, stale test count) suggest the docs were already in
+  reasonably good shape from being updated at the end of each phase, not that the audit was too
+  shallow to find anything.
+
+---
+
 ## Phase 8 — Failed-automation tooling, reporting, demo page, admin login, real browser tests ✅
 
 This phase was mostly internal-facing polish rather than new integrations, so there was no new

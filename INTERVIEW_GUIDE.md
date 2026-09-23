@@ -4,12 +4,213 @@
 > Describe it that way. Do not present it as a client system or claim production incidents.
 > All data is fictional. Failure scenarios are demo/test scenarios run locally.
 
-The full project walkthrough (2-minute and 5-minute versions) will be added in Phase 9.
-This file currently covers **Phase 3: scoring and routing**, **Phase 4: the automation engine**,
-**Phase 5: the HighLevel integration layer**, **Phase 6: webhooks and n8n**, **Phase 7: appointment booking**,
-and **Phase 8: failed-automation tooling, reporting, the demo page, admin login, and real browser tests**.
+This file has two layers. First, the top-level material for the interview itself: a 2-minute
+pitch, a 5-minute technical walkthrough, why each piece of the stack was chosen, 20 likely
+questions answered plainly, and an honest "what would I improve" section. Below that, the
+**phase-by-phase deep dive** (Phase 3 through Phase 8) — the same material in more depth, with
+more technical Q&A per phase, for when a question goes deeper than the top-level answer covers.
 
 ---
+
+## 2-Minute Explanation — the whole project (say this)
+
+"LeadFlow is a CRM and sales-automation system I built to learn and demonstrate the patterns an
+automation-developer role actually needs — GoHighLevel integration, webhooks, n8n, background
+job processing — end to end, not just the UI. A lead comes in, gets deduplicated against
+existing contacts, scored out of 100 across five factors with a plain-English reason for each,
+and routed to a sales rep by configurable rules. From there it enters a follow-up sequence, can
+be booked into an appointment with DST-safe scheduling, and every change syncs to HighLevel
+through an outbox pattern — plus the whole thing accepts real signed webhooks from HighLevel and
+n8n, and I actually ran an n8n workflow against it in Docker rather than just writing the JSON.
+
+The two architectural decisions I'd lead with: everything that isn't an immediate read-your-own-write
+runs through a Postgres-backed job queue — not Redis, not an in-memory scheduler — because the
+web app and the background worker are genuinely separate processes, and a database is the one
+thing they can both safely coordinate through. And nothing in this project is claimed to work
+unless I actually ran it and watched it happen — concurrent requests really do race against a
+real Postgres database in the test suite, the n8n workflow really was triggered against a real
+running server, and where something *isn't* verified — like a live HighLevel account — I say so
+directly instead of implying more coverage than exists. That honesty-about-what's-tested habit
+is probably the single most repeated theme across the whole build."
+
+---
+
+## 5-Minute Technical Walkthrough (say this, or use as a live-demo script)
+
+"I'll walk through one lead's entire lifecycle, because it touches almost every piece.
+
+**Intake.** A lead comes in from a form, a webhook, or the UI. Before anything is created, it's
+checked against existing contacts by normalized email and E.164 phone — both are unique-indexed
+in Postgres, so even a race between two near-simultaneous submissions can't create a duplicate;
+the database itself refuses it, not just an application-level check.
+
+**Scoring & routing.** The new contact is scored — budget fit, service fit, engagement, reply
+status, appointment status — each factor a pure function returning a number and a reason, so
+it's unit-tested down to exact boundaries without touching a database. Missing data gets neutral
+credit, not zero, because absence of information isn't evidence a lead is bad. Routing then
+picks an owner by priority-ordered rules, inside a transaction with row locks, so two leads
+routing at the same instant can never push a rep over capacity or get double-assigned.
+
+**Automation.** Creating the contact also starts a workflow run and enqueues its first follow-up
+as a job in Postgres. A separate worker process — not the web app, a genuinely different
+long-running process — polls for due jobs with `SELECT ... FOR UPDATE SKIP LOCKED`, so multiple
+workers never claim the same job. Failures are classified transient or permanent: transient gets
+exponential backoff with jitter, permanent fails immediately rather than wasting retries. Every
+send is idempotent by a unique key, so a retried job can never double-send.
+
+**Sync.** The same write that created the contact also enqueues a HighLevel sync job — an outbox
+pattern, on the same queue. A `CrmProvider` interface has a mock and a real implementation,
+switched by one env var; neither the services nor the worker know which one is active. The
+HighLevel id is stored once and reused, so retries never create a duplicate record there.
+
+**Inbound.** HighLevel or n8n can also push events back in — six webhook endpoints, each
+signature-verified (HMAC or Ed25519) *before* anything touches the database, idempotent by a
+unique `(source, event_id)` pair.
+
+**Booking.** If the lead books a meeting, one function handles everything that needs to happen
+together — stage change, stop the follow-up sequence, confirmation, reminders, rep notification,
+rescoring, HighLevel sync — called identically whether the booking came from the UI or a
+webhook. Double-booking is refused by a Postgres exclusion constraint, not just application code.
+
+Everything above has a corresponding test that runs against a real Postgres database, not mocks,
+for anything involving concurrency or a real query — 225 of them, plus 5 real-browser Playwright
+tests for the UI parts a database test can't reach, like drag-and-drop."
+
+---
+
+## Why each piece of the stack was chosen
+
+- **Next.js 16 (App Router, Server Actions)** — one framework for pages, forms, and API routes
+  meant less glue code than a separate frontend + REST backend, and Server Actions let a form
+  submit directly to server logic without hand-rolling an API endpoint for every mutation. The
+  trade-off, found the hard way: this is a genuinely new-enough major version that some behavior
+  (Server Actions' build-time manifest requiring a directly-declared `async function`, not a
+  const arrow function; `middleware.ts` renamed to `proxy.js`) differs from older docs and
+  training data — I got bitten by both and documented the fixes in `IMPLEMENTATION_LOG.md`.
+- **TypeScript everywhere** — the routing and scoring engines are pure functions with real
+  business logic; type errors at the boundaries (a stage that isn't a valid enum value, a job
+  payload missing a field) are exactly the class of bug that's cheap to catch at compile time and
+  expensive to catch in production.
+- **PostgreSQL + Drizzle ORM** — Postgres specifically for two features this project leans on
+  hard: `SELECT ... FOR UPDATE SKIP LOCKED` for the job queue, and `EXCLUDE USING gist` for the
+  appointment no-overlap guarantee — neither is a generic "any SQL database" feature. Drizzle
+  over a heavier ORM because the schema is plain TypeScript (not a separate DSL/schema file) and
+  it generates real, readable, hand-editable SQL migrations — needed twice, for an enum rename
+  and the exclusion constraint, since Drizzle's own schema builder can't express either.
+- **Vitest** — fast, native TypeScript/ESM support, and the same tool for pure unit tests and
+  real-Postgres integration tests, so there's one test runner and one mental model for both.
+- **Playwright** — added in Phase 8 specifically because some bugs (native HTML5 drag-and-drop
+  not firing, a form hanging for a no-JS submission) are structurally invisible to any test that
+  doesn't run a real browser against a real server.
+- **Postgres as the job queue instead of Redis/BullMQ/a managed queue** — covered in the README
+  and Phase 4 sections below; short version, the web app and worker are separate processes that
+  can only safely coordinate through a database, and outbox-pattern transactional guarantees
+  (a contact and its follow-up job either both exist or neither does) come for free.
+
+---
+
+## 20 Interview Questions — quick reference
+
+*(Full-length versions of many of these, with more follow-ups, are in the phase sections below —
+this list is for a fast pass before walking in.)*
+
+1. **What is this project and why did you build it?** — A CRM/automation system covering the
+   exact surface area of a GoHighLevel/n8n automation-developer role — scoring, routing, a job
+   queue with retries, HighLevel sync, signed webhooks, DST-safe booking — built and tested
+   end to end, not just a UI mockup.
+2. **What's the single architectural decision you'd defend hardest?** — Coordinating the web app
+   and worker only through Postgres, never in-memory. It's what makes the retry/recovery
+   guarantees, the outbox pattern, and the two-process deployment all possible at once.
+3. **How do you prevent duplicate leads?** — Unique indexes on normalized email and E.164 phone
+   in Postgres — an application-level check alone can be raced; a unique index cannot.
+4. **How does lead scoring handle missing data?** — Neutral partial credit, never zero; only
+   explicit negative evidence lowers a factor. See the Phase 3 section for exact numbers.
+5. **How does routing avoid assigning two leads to the same rep over capacity at once?** — Row
+   locks (`SELECT ... FOR UPDATE`, always in id order) inside one transaction; proven with a
+   concurrent-request test, not just reasoned about.
+6. **Why a Postgres job queue instead of Redis/BullMQ?** — The worker is a separate long-running
+   process a serverless web app can't host internally; the queue has to live somewhere both
+   processes can reach, and transactional outbox guarantees come for free with the same database.
+7. **How do you stop two workers claiming the same job?** — One atomic
+   `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)` — proven with 4 simulated
+   concurrent workers claiming zero duplicate rows.
+8. **What happens if a worker crashes mid-job?** — Its lease expires, the next poll recovers the
+   job; if the "dead" worker wakes up late and tries to finish it anyway, the completion UPDATE's
+   `WHERE locked_by = me AND status = 'processing'` clause matches nothing and is silently ignored.
+9. **How do you guarantee a message is never sent twice?** — A unique idempotency key per
+   message, checked before sending, even on a retried job.
+10. **Why classify errors as transient vs. permanent?** — Retrying a permanent error (bad
+    recipient, no handler) just wastes the retry budget and delays the person finding out;
+    transient errors get exponential backoff with jitter so a mass failure doesn't retry in lockstep.
+11. **What's the outbox pattern and where do you use it?** — Enqueueing a sync/follow-up job in
+    the *same transaction* as the row that triggered it, so the two can never exist independently.
+    Used for HighLevel sync (Phase 5) and the follow-up engine (Phase 4).
+12. **How do you avoid double-creating a record in HighLevel on a retried sync?** — The
+    HighLevel id is stored on the first successful create and reused on every later sync; the
+    handler checks for it and calls update instead of create if present.
+13. **How do webhook requests get authenticated, and why check the signature before any DB write?**
+    — HMAC-SHA256 (our own traffic, timing-safe compare) or Ed25519 (HighLevel), verified before
+    any query — so an unauthenticated request leaves literally no trace in the database.
+14. **How do you handle a webhook delivered twice (at-least-once delivery)?** — A unique
+    `(source, event_id)` constraint; a duplicate delivery replays the stored original result.
+15. **How is appointment booking DST-safe?** — Each day's slots are computed independently for
+    that specific date's UTC offset, not by mechanically adding 24 hours to the previous day —
+    proven against both of 2026's real US DST transition dates.
+16. **How do you actually prevent double-booking, not just check for it?** — A Postgres
+    `EXCLUDE USING gist` constraint — the database itself refuses an overlapping insert, closing
+    the race window an application-level check-then-insert can't close.
+17. **What's a real bug you found (not hypothetical) and how did you find it?** — Several,
+    documented with root cause and fix in `IMPLEMENTATION_LOG.md` — e.g. a no-JS form hang traced
+    by elimination to "any non-redirecting `useActionState` action hangs", and an n8n HTTP-node
+    parameter name bug found by diffing n8n's own node-type schema.
+18. **What did `npm run build` catch that tests didn't?** — Next's Server Actions compiler needs
+    a directly-declared `async function` for its action manifest; a `const x = (...) => ...`
+    export compiles under `tsc` and passes all tests but fails only at build time. Happened twice
+    (Phase 7, Phase 8), which is why `verify` always runs a real build, not just tests.
+19. **What isn't verified, and why say so instead of hiding it?** — No real HighLevel account,
+    HighLevel's native webhook payload shape isn't mapped, the admin login is one shared password
+    not per-user auth. Stated explicitly in `IMPLEMENTATION_LOG.md` and `README.md`'s "Known
+    limitations" — claiming untested code works is worse than admitting the boundary.
+20. **How would you deploy this?** — Web app on Vercel, Postgres on Supabase (transaction pooler
+    needs `DATABASE_PREPARE=false`), worker on Railway/Render as an always-on process — Vercel
+    functions are killed shortly after responding, so the worker's infinite poll loop can't live
+    there. Full guide in `DEPLOYMENT.md`; nothing has actually been deployed.
+
+---
+
+## Honest answers: what would you improve?
+
+Asked directly, in order of what I'd actually prioritize:
+
+1. **Per-user authentication, not a shared admin password.** The current login is deliberately
+   minimal — one password gates the whole app. A real product needs per-user accounts, roles,
+   and (per Next's own guidance) an auth check inside each Server Function, not just at the Proxy
+   layer. I scoped it down on purpose to match what a demo needs, but it's the first thing I'd
+   change for anything beyond a single-person interview walkthrough.
+2. **A real HighLevel account.** Everything is doc-verified and unit-tested against a mocked
+   `fetch`, but nothing has touched a live account. I'd want one real end-to-end sync run before
+   trusting the response-shape assumptions (like `HighLevelProvider.createAppointment()`'s `res.id`)
+   that are currently flagged UNVERIFIED rather than confirmed.
+3. **A persistent toast/notification system instead of per-row inline state.** The "Retry now"
+   button's success message can vanish almost immediately because `revalidatePath` refreshes the
+   whole list right after — the retry genuinely succeeds, but the confirmation is easy to miss. A
+   proper toast layer that survives a route refresh would fix that cleanly.
+4. **Job-dependency ordering instead of "retry until it works."** The opportunity-sync job
+   currently handles running before its contact has synced by throwing a transient error and
+   retrying — self-correcting, but not truly ordered. A small dependency graph would be more
+   precise at higher volume.
+5. **Rate limiting on the login endpoint.** There's currently no brute-force protection on the
+   admin password beyond it being a password — fine for a local demo, not fine for anything public.
+6. **More of the no-JS form path actually tested**, not just the success/redirect half — see
+   the stated limitation in `IMPLEMENTATION_LOG.md`, Phase 8.
+
+---
+
+# Phase-by-phase deep dive
+
+Everything below goes deeper than the top-level material above — more Q&A per phase, and a
+step-by-step live-demo script for each. Use it when a question goes past what the quick
+reference covers.
 
 ## Routing engine — 2-minute explanation (say this)
 
