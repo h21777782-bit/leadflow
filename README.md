@@ -5,9 +5,11 @@ interview demonstration project. Stack: **Next.js 16 (App Router) + TypeScript,
 Tailwind CSS v4, PostgreSQL (Supabase-compatible) via Drizzle ORM, Vitest.**
 HighLevel and n8n integrations are added in later phases.
 
-> **Status: Phase 3 of 9 complete** — contacts with duplicate detection, opportunities, Kanban,
-> audit log, **lead scoring (Hot/Warm/Cold with explanations) and rule-based lead routing**.
-> Automations/worker, retries, webhooks and HighLevel are **not built yet**.
+> **Status: Phase 8 of 9 complete** — contacts with duplicate detection, opportunities, Kanban,
+> audit log, lead scoring and rule-based routing, a Postgres-backed automation engine and worker,
+> a HighLevel integration layer, signed inbound webhooks + n8n, DST-safe appointment booking, and
+> (Phase 8) failed-automation tooling, dashboard reporting, a `/demo` scenario page, a simple admin
+> login, and real Playwright browser tests. Only Phase 9 (docs polish, deployment guide) remains.
 > See `IMPLEMENTATION_LOG.md` for what is done and what remains.
 
 All people, companies, emails and phone numbers in the demo data are fictional.
@@ -59,6 +61,7 @@ docker compose up -d
 | `npm run typecheck` | Generates Next.js route types, then `tsc --noEmit` |
 | `npm run lint` | ESLint, zero warnings allowed |
 | `npm test` | Unit tests + DB integration tests (DB tests skip if `TEST_DATABASE_URL` is empty) |
+| `npm run e2e` | Playwright browser tests (Kanban drag-drop, forms, Retry now, `/demo`) against a real running dev server + database |
 | `npm run env:check` | Validate `.env.local`; prints a summary without secret values |
 | `npm run verify` | typecheck → lint → test → build (run before every commit) |
 | `npm run db:generate` | Create a new SQL migration after editing `src/db/schema.ts` |
@@ -87,7 +90,8 @@ message listing every invalid variable. Secrets are never shown in the UI.
 |---|---|---|
 | `DATABASE_URL` | yes | Postgres connection string |
 | `TEST_DATABASE_URL` | for DB tests | Separate DB — the test suite wipes it |
-| `DEMO_ACTOR_EMAIL` | no (`admin@leadflow.example`) | No login yet: UI actions are attributed to this user |
+| `DEMO_ACTOR_EMAIL` | no (`admin@leadflow.example`) | Every UI action is attributed to this one user, regardless of who's signed in (there's no per-person login, just the shared admin password below) |
+| `ADMIN_PASSWORD` | no | Gates every page and internal API behind one shared password (`src/proxy.ts`). Unset = app runs fully open (local dev only; a startup warning is logged). `/api/webhooks/*` is never gated by this — it's protected by its own signature checks instead |
 | `APP_TIMEZONE` | no (`Asia/Kolkata`) | Timezone used to display times in the UI |
 | `DEFAULT_CURRENCY` | no (`USD`) | |
 | `MOCK_MODE` | no (`true`) | `true` = HighLevel calls go to the isolated mock provider |
@@ -175,22 +179,35 @@ library) and shown in the **lead's** timezone. Double-booking is impossible even
 concurrency — not just checked in application code, but refused by a Postgres `EXCLUDE` constraint
 on `appointments`, verified with a real concurrent-request test.
 
-Planned (later phases): ops/reporting screens, a demo scenario page, auth.
+Built as of Phase 8: `src/proxy.ts` (this Next.js version renamed `middleware.ts` → `proxy.js` — see
+`IMPLEMENTATION_LOG.md`) gates every page behind a single shared admin password, excluding
+`/api/webhooks/*` and `/api/health`, which stay protected by their own mechanisms instead. The
+`/demo` page runs a real fictional lead through the actual intake service and renders its real
+`audit_logs` timeline — not a scripted animation. A no-JS form hang bug (any `useActionState` form
+that doesn't `redirect()` on success hung indefinitely for a plain-HTML-form submission) was
+root-caused by elimination and fixed. `e2e/*.spec.ts` (Playwright) cover the Kanban board's native
+HTML5 drag-and-drop, the contact form, Failed Automations' Retry Now, and the demo page, against a
+real browser and a real database.
+
+Planned (Phase 9): a full README/architecture rewrite, `INTERVIEW_GUIDE.md`'s 2-/5-minute
+walkthroughs, `FAILURE_STORY.md`, and `DEPLOYMENT.md`.
 
 ### Folder map
 
 ```
 src/
-  app/(app)/…            pages (Dashboard, Contacts, Lead details, Pipeline, Automations, Integrations, Webhook events, …)
+  proxy.ts                admin-login gate (Next 16's middleware → proxy rename) — excludes webhooks + health
+  app/(app)/…            pages (Dashboard, Contacts, Lead details, Pipeline, Automations, Failed automations, Demo, …)
+  app/login/              admin sign-in page
   app/api/health         liveness + DB check (503 when DB is down)
   app/api/webhooks/      6 inbound webhook routes (thin — logic lives in server/http/webhook-route.ts)
   components/            sidebar + small UI primitives
   db/schema.ts           full database schema (all phases)
   db/seed-data.ts        demo dataset (pure data, unit-tested)
   db/seed.ts             transactional seed routine
-  lib/                   env validation, normalization, timezone, scheduling (DST-safe slots), pipeline constants, backoff, job-errors, webhook-signature
+  lib/                   env validation, normalization, timezone, scheduling (DST-safe slots), pipeline constants, backoff, job-errors, webhook-signature, admin-session
   server/http/           shared webhook route handler (auth, size limit, dispatch) behind app/api/webhooks/*
-  server/queries/        read-side data access used by pages
+  server/queries/        read-side data access used by pages, incl. dashboard reporting (Phase 8)
   server/queue/          job queue (enqueue, claim, complete/fail, recovery)
   server/worker/         worker runtime (handler registry, poll loop)
   server/workflows/      nurture (follow-up), crm-sync (outbox), webhook-process, and appointment-reminders workflows
@@ -200,6 +217,7 @@ scripts/                 migrate / seed / worker / demo / webhook:send CLIs
 drizzle/                 generated SQL migrations (committed)
 n8n/                     importable n8n workflow JSON
 tests/                   Vitest unit + DB integration tests
+e2e/                     Playwright browser tests (real Chromium + real database)
 ```
 
 ---
@@ -242,8 +260,11 @@ cannot be raced.
 - `/api/health` hides raw database errors in production (they can reveal hosts/ports).
 - The seed refuses to run when `NODE_ENV=production` unless explicitly overridden.
 - Lead details validates the id format before querying.
-- No authentication yet — this is a local demo. A real deployment would put the
-  app behind auth (e.g. Supabase Auth) and restrict admin routes.
+- A simple shared-password admin login (`ADMIN_PASSWORD`, `src/proxy.ts`) gates every page and
+  internal API — a signed httpOnly cookie, not a plaintext session, but still a single shared
+  password for one "admin" role, not per-user accounts. `/api/webhooks/*` stays gated by its own
+  HMAC/Ed25519 signature checks instead, since HighLevel/n8n can't hold a browser session. A real
+  deployment would replace this with per-user auth (e.g. Supabase Auth).
 
 Webhook signatures, idempotency, retries, the HighLevel integration layer and
 n8n are documented as each phase lands.

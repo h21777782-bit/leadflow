@@ -3,8 +3,9 @@
 Exact state of LeadFlow at handoff. Any AI assistant or developer continuing this
 project should read this file, then `IMPLEMENTATION_LOG.md`.
 
-**Updated 2026-09-23:** Phase 7 is now complete (appointment booking). Phase 6 (webhooks + n8n) was
-also completed 2026-09-23; Phases 4 and 5 were completed 2026-09-22 — see `IMPLEMENTATION_LOG.md`.
+**Updated 2026-09-23:** Phase 8 is now complete (failed-automation tooling, dashboard reporting, the
+`/demo` page, admin login, and real Playwright browser tests). Phase 7 (appointment booking) and
+everything before it was completed earlier the same day — see `IMPLEMENTATION_LOG.md`.
 
 ## Phase status
 
@@ -16,14 +17,31 @@ also completed 2026-09-23; Phases 4 and 5 were completed 2026-09-22 — see `IMP
 | 4 Automation engine, follow-ups, retries | ✅ **complete** — engine, UI, 26 integration tests, 3 demo scripts, docs |
 | 5 HighLevel integration | ✅ **complete** — CrmProvider (mock + real), outbox sync, 11 integration tests, demo script, docs |
 | 6 Webhooks + n8n | ✅ **complete** — 6 signed endpoints, Webhook Events UI, n8n workflow actually run in Docker, 26 tests, docs |
-| **7 Appointment booking** | ✅ **complete** — DST-safe slots, DB-enforced no-overlap, one booking flow (stage/workflow/confirm/reminders/notify/rescore/sync), reschedule/cancel/no-show/completed, 21 tests, docs |
-| 8 Ops screens, reporting, demo page, auth | ⏳ not started |
+| 7 Appointment booking | ✅ **complete** — DST-safe slots, DB-enforced no-overlap, one booking flow (stage/workflow/confirm/reminders/notify/rescore/sync), reschedule/cancel/no-show/completed, 21 tests, docs |
+| **8 Failed-automation tooling, reporting, demo page, admin login, real browser tests** | ✅ **complete** — filters/bulk retry, 3 dashboard reporting queries, `/demo` scenario page, shared-password admin login (`src/proxy.ts`), a real no-JS-hang bug found and fixed, 5 Playwright browser tests, docs |
 | 9 Final docs, FAILURE_STORY, deployment guide | ⏳ not started |
 
 ## Verified at handoff (actually run)
 
-- `npm run verify` → typecheck ✓, lint 0 warnings ✓, **216 tests passed (17 files)**, production build ✓
-  (195 carried over from Phase 6 + 11 scheduling + 10 appointments-integration tests).
+- `npm run verify` → typecheck ✓, lint 0 warnings ✓, **225 tests passed (18 files)**, production build ✓
+  (216 carried over from Phase 7 + 9 new admin-session tests).
+- `npm run e2e` (Playwright, real Chromium + real Postgres) → **5/5 passed, confirmed stable across
+  three consecutive full runs** — Kanban drag-and-drop, the contact intake form, Failed Automations'
+  Retry Now, and the `/demo` page (create + reset). See `IMPLEMENTATION_LOG.md`, Phase 8, for the three
+  real bugs this surfaced (native HTML5 DnD needing a manual mouse sequence, and two test-isolation
+  bugs from unbounded same-named leftover data across repeated runs).
+- **A real, previously-uninvestigated bug was found and fixed**: any `useActionState`-bound form action
+  that doesn't call `redirect()` on success hangs indefinitely for a no-JavaScript submission in this
+  Next.js build. Root-caused by elimination (not guesswork) and fixed in
+  `src/app/actions/lead-intelligence.ts`; verified via the same raw-multipart-POST technique used since
+  Phase 6. Full write-up in `IMPLEMENTATION_LOG.md`, Phase 8.
+- Admin login (`ADMIN_PASSWORD`, `src/proxy.ts`) verified live: page redirect to `/login` when unset →
+  set, wrong password → fast redirect with an error (not a hang), correct password → signed httpOnly
+  cookie → in, Log out clears it, `/api/webhooks/*` and `/api/health` confirmed to stay reachable and
+  gated by their own mechanisms instead. Restored to unset afterward so local dev stays open by default.
+- `/demo` verified live end to end: created a real lead via raw HTTP (full pipeline visible in the
+  timeline — duplicate check, contact, opportunity, scoring, routing, follow-up scheduling), reset, then
+  confirmed via `psql` the demo-tagged row was actually gone from the database.
 - Migration `0002_automation_engine.sql` applied on a **copy of real data** (Phase 4 detail — old job
   statuses renamed in place, no rows lost). Migrations `0003_webhooks_n8n.sql` (Phase 6) and
   `0004_appointments_booking.sql` (Phase 7) are additive — the latter also hand-adds a Postgres
@@ -111,11 +129,29 @@ also completed 2026-09-23; Phases 4 and 5 were completed 2026-09-22 — see `IMP
 | `src/components/settings/working-hours-editor.tsx` | Per-rep working hours on the Settings page |
 | `tests/scheduling.test.ts` (11), `tests/appointments-integration.test.ts` (10) | DST, concurrent double-booking, reminder-skipped-after-cancel, idempotent booking webhook |
 
+## Phase 8 — what exists
+
+| File | What it does |
+|---|---|
+| `src/server/queries/index.ts` (extended) | `listFailedJobs`/`listFailedJobTypes` filters; `getConversionFunnel`, `getTimeInStage` (window-function query), `getWorkflowRates` — 3 new dashboard reporting queries |
+| `src/components/automations/bulk-retry.tsx` (`FailedJobsTable`) | Filters, per-row attempt history, guarded bulk retry — one client component owns all selection state |
+| `src/app/(app)/dashboard/page.tsx` (extended) | Date-range filter + conversion funnel / workflow rates / time-in-stage panels |
+| `src/app/(app)/demo/page.tsx`, `src/app/actions/demo.ts` | Runs a real fictional lead through the actual intake service; renders its real `audit_logs` timeline; reset deletes only `demo-live`-tagged data |
+| `src/proxy.ts`, `src/lib/admin-session.ts`, `src/app/actions/admin-auth.ts`, `src/app/login/page.tsx` | Shared-password admin login — signed httpOnly cookie, `/api/webhooks/*` and `/api/health` excluded on purpose |
+| `src/app/actions/lead-intelligence.ts` (fixed) | `logReplyAction`/`updateRepAction`/`saveRuleAction` now redirect on success instead of hanging for no-JS submissions |
+| `playwright.config.ts`, `e2e/*.spec.ts` | 5 real-browser tests (Kanban DnD, contact form, Retry now, demo page) |
+| `tests/admin-session.test.ts` (9) | Sign/verify/expiry/tamper unit tests for the login cookie |
+
 ## Known limitations carried over
 
-- No authentication (actions attributed to demo admin).
-- No-JavaScript form fallback hangs for forms that stay on the page after saving (JS path works).
-- Nothing was tested in a real browser (sandbox had none).
+- Admin login is one shared password for a single "admin" role, not per-user accounts — see
+  `README.md`'s Security notes. Next's own docs note Proxy-level gating alone isn't a complete answer
+  for Server Functions; this phase didn't add a second, per-action auth check on top of it.
+- The "return inline state on error" half of the no-JS hang fix is unproven for the no-JS path itself
+  (only the success/redirect path was verified) — see `IMPLEMENTATION_LOG.md`, Phase 8. The two new
+  forms this phase (`/login`, `/demo`) route around this entirely by always redirecting.
+- Playwright only runs Chromium, headless, no touch/mobile-viewport drag testing (the "Move to"
+  dropdown fallback exists specifically because HTML5 drag-and-drop doesn't work on touch screens).
 - `next.config.ts` allows server actions from `*.app.github.dev` (Codespaces) — **not tested in Codespaces yet**.
 - The real `HighLevelProvider` (Phase 5) has never made a request against a live HighLevel account —
   only against a mocked `fetch` in tests. If real credentials are supplied, run `npm run demo:crm`-style
@@ -129,8 +165,9 @@ also completed 2026-09-23; Phases 4 and 5 were completed 2026-09-22 — see `IMP
 - Booking deliberately never calls HighLevel's own `free-slots` endpoint — our own DST-safe
   `src/lib/scheduling.ts` is the single source of truth for availability, so a meeting created directly
   in HighLevel (outside this app) would not be detected or prevented here.
-- No admin auth yet (Phase 8) means the booking form, working-hours editor, and appointment actions are
-  all open to anyone who can reach the app, same as every other write path in this demo.
+- The admin login added in Phase 8 (`ADMIN_PASSWORD`) now gates the booking form, working-hours editor,
+  and every other write path when it's set — see the Phase 8 section above. It's unset by default in
+  this dev environment for convenience, so the app currently runs open.
 
 ## How to run
 
@@ -142,4 +179,5 @@ npm run db:migrate && npm run db:seed
 npm run dev                        # web app  → http://localhost:3000
 npm run worker                     # worker   → separate terminal
 npm run verify                     # typecheck + lint + tests + build
+npm run e2e                        # Playwright browser tests (needs the dev server running)
 ```

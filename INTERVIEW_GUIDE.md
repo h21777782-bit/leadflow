@@ -6,7 +6,8 @@
 
 The full project walkthrough (2-minute and 5-minute versions) will be added in Phase 9.
 This file currently covers **Phase 3: scoring and routing**, **Phase 4: the automation engine**,
-**Phase 5: the HighLevel integration layer**, **Phase 6: webhooks and n8n**, and **Phase 7: appointment booking**.
+**Phase 5: the HighLevel integration layer**, **Phase 6: webhooks and n8n**, **Phase 7: appointment booking**,
+and **Phase 8: failed-automation tooling, reporting, the demo page, admin login, and real browser tests**.
 
 ---
 
@@ -250,3 +251,49 @@ Two things I was specific about. First, timezones: a rep's working hours are wal
 4. Back on `/appointments`, **Reschedule** it, then show a fresh booking attempt at the *old* slot succeeding (it's free again).
 5. Terminal: `npx vitest run tests/appointments-integration.test.ts` → point at *the database refuses a raw overlapping INSERT* and *concurrent booking … exactly one succeeds*.
 6. Terminal: `npx vitest run tests/scheduling.test.ts` → point at the two DST transition tests.
+
+---
+
+## Phase 8: polish, demo page, login, real browser tests — 2-minute explanation (say this)
+
+"Phase 8 didn't add a new integration — it made the existing product actually demoable and closed out a bug the project's own notes had flagged but never investigated. Three pieces worth mentioning.
+
+First, I found and fixed a real framework-level bug: any form on this Next.js build bound to `useActionState` that doesn't call `redirect()` hangs forever for a no-JavaScript submission. I proved that by elimination — stripped the database call, stripped `revalidatePath`, reduced the action to a no-op returning a static object, and it still hung. That told me it wasn't application code at all. The fix was already sitting in the codebase as a working pattern on one other form — redirect on success, only return state on error — I just hadn't applied it consistently everywhere.
+
+Second, the `/demo` page: instead of a scripted animation, clicking 'Create a demo lead' calls the exact same `createContact()` service the real intake form uses, and the timeline it shows afterward is that contact's real `audit_logs` rows, not a mock-up. It's the same principle as every other phase here — show it actually happening, don't simulate the appearance of it happening.
+
+Third, real browser tests with Playwright — actual Chromium, actual drag-and-drop on the Kanban board, actual form submissions, against the actual dev database. That surfaced two more real bugs that unit and integration tests structurally couldn't have caught: Playwright's own `dragTo()` doesn't trigger this board's native HTML5 drag events, and my first test run passed once, then failed on a second run because of leftover same-named test data — the exact same class of test-isolation bug I'd already hit once in Phase 7."
+
+---
+
+## Phase 8 — technical questions with accurate answers
+
+**1. How did you find the no-JS form hang bug, and how do you know the fix is actually the fix and not a coincidence?**
+> I reproduced it first, live, with a raw HTTP multipart POST — the same technique used since Phase 6 to test the no-JS form path, extracting the real hidden `$ACTION_ID_*` field from server-rendered HTML and posting it back without the `Next-Action` header a JS-driven fetch would send. Then I narrowed the cause by elimination rather than guessing: removed `revalidatePath`, still hung; removed the database write, still hung; reduced the action to a no-op returning a static object, still hung. That process of elimination is what tells me it's a framework behavior — "any non-redirecting `useActionState` action hangs for no-JS" — not a coincidence tied to one specific handler. And the fix wasn't invented: `createContactAction` already redirected on success and only returned state on error, and I could point at it working correctly before I ever touched the three broken actions. After the fix, the same raw-HTTP technique that reproduced the hang confirmed it: sub-second response, correct 303 redirect, confirmed database write.
+
+**2. You said the "return state on error" half of the fix is unproven. Why leave that gap instead of closing it?**
+> Because closing it properly would mean redesigning every form's error-display pattern in the app, and that's a much bigger, riskier change than what this phase asked for — the actual bug report was about a hang, which I fixed and verified. What I did instead was contain the risk: the two brand-new forms this phase (`/login`, `/demo`) were designed from scratch to never rely on that unproven path at all — they always redirect, success or failure. That's a smaller, safer scope than retrofitting every existing form, and it's honest about exactly what's proven versus assumed.
+
+**3. Why does `/demo` reuse `getContactDetail()` instead of building a dedicated, simpler query for the demo page?**
+> Because `getContactDetail()`'s `.timeline` field was already built, already tested indirectly by every real contact-detail page load, and already exactly the data I needed — real `audit_logs` rows for a contact, newest first. Writing a second, parallel query just for the demo page would mean two code paths that could drift out of sync, and would also weaken the actual point of the page: that the timeline it shows is the *same* real data path every other page uses, not a demo-specific shortcut that might quietly diverge from what real leads actually look like.
+
+**4. Walk me through the admin login. What's it actually protecting, and what deliberately isn't gated?**
+> It gates every page and every internal API behind one shared password — a signed httpOnly cookie, HMAC-derived key from the password so the password itself is never stored client-side. What's deliberately excluded: `/api/webhooks/*` and `/api/health`. Webhooks can't hold a browser session — HighLevel and n8n aren't logging in — so they stay protected by their own HMAC/Ed25519 signature checks from Phase 6 instead, which is the correct mechanism for machine-to-machine auth, not a login gate. Health stays open because uptime monitors need it reachable without credentials. And if `ADMIN_PASSWORD` isn't set at all, the app runs fully open — that's a deliberate local-dev convenience, with a startup warning logged so it's never silently open by accident in a real deployment.
+
+**5. What did writing real Playwright tests catch that your 225 Vitest tests didn't, and couldn't have?**
+> Two things, both about things that only exist once a real browser renders and a person (or a script pretending to be one) actually interacts with the page. First, the Kanban board's drag-and-drop is native HTML5 `draggable`/`dataTransfer` — Playwright's own `dragTo()` helper never triggered it; a unit test calling the drop handler function directly would have passed even if a real mouse-drag in a real browser did nothing, because it never exercises the actual `dragstart`/`dragover` event sequence a browser fires. Second, test isolation: my first e2e run passed, a second run of the exact same suite failed, because both runs created a contact with the same display name and the second test's "find the first card" logic picked up the wrong leftover card from the first run. No unit or integration test structure would have caught that, because it's specifically about state accumulating across full end-to-end runs against a real, persistent database — which is the whole point of having this test layer at all.
+
+**Likely follow-ups**
+- *"Why Playwright and not Cypress or something else?"* → No strong reason beyond it being the more common modern default and having first-class TypeScript support that matches the rest of the stack; either would have caught the same bugs.
+- *"Is the admin login secure enough for a real product?"* → No, and I wouldn't claim otherwise — it's one shared password for a single-tenant interview demo, not per-user auth, no rate limiting on login attempts, no audit trail of who's logged in since there's only one "who". For a real product this would need per-user accounts, and Next's own docs specifically warn that Proxy-level gating alone isn't a complete answer for Server Functions — I noted that as a stated limitation rather than papering over it.
+- *"Why manual mouse events for drag-and-drop instead of just testing the 'Move to' dropdown fallback?"* → The dropdown fallback exists specifically because HTML5 drag-and-drop doesn't work on touch devices — it's already a secondary path, and testing only the secondary path would mean the feature most people will actually use on desktop (dragging a card) had zero browser-level coverage.
+
+---
+
+## Step-by-step live demo — Phase 8 (≈3 minutes)
+
+1. **`/failed-automations`** → filter by job type, expand a row's attempt history, select two rows and use **Retry selected**.
+2. **`/dashboard`** → scroll to the new panels: conversion funnel, workflow success/failure rates, average time-in-stage; change the date range.
+3. **`/demo`** → **Create a demo lead** → point at the real timeline (duplicate check → contact → opportunity → scored → assigned → follow-up scheduled), then **Reset demo data**.
+4. Set `ADMIN_PASSWORD` in `.env.local`, restart the dev server → hitting `/dashboard` bounces to `/login`; sign in with the wrong password (redirects with an error, no hang), then the right one → in, with a **Log out** link in the sidebar. Unset it again afterward to go back to open local dev.
+5. Terminal: `npm run e2e` → real Chromium, real Postgres — Kanban drag-and-drop, the contact form, Retry Now, and the demo page, five tests, actually watched to pass.

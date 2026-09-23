@@ -433,7 +433,62 @@ local start time never moves, and neither day silently gains or loses a working-
 - `npx vitest run tests/appointments-integration.test.ts` → *upsertAppointmentFromWebhook is idempotent
   on ghlAppointmentId: delivered twice updates in place, never creates two rows*.
 
-## 14. Reset before an interview
+## 14. Phase 8 — failed-automation tooling, reporting, demo page, admin login, real browser tests
+
+### 14a. Failed automations — filters and bulk retry
+
+1. `/failed-automations` → filter by **Job type**, then by **Status**.
+2. Expand a row's **Attempt history**.
+3. Select two or more retryable rows → **Retry selected** → confirm → point out the summary count.
+
+### 14b. Dashboard reporting
+
+`/dashboard` → scroll past **Automation health** to the three new panels: **Conversion funnel**,
+**Workflow success/failure**, **Average time in stage**. Change the date-range filter at the top and
+show the numbers move.
+
+### 14c. The `/demo` Demo Scenario page
+
+```bash
+# nothing to run first — it's a page, not a script
+```
+
+1. `/demo` → **Create a demo lead** → point at the real timeline: duplicate check → contact →
+   opportunity → scored → assigned → follow-up scheduled — every line is a real `audit_logs` row for
+   the contact that was just actually created through the real intake service, not a mock-up.
+2. **Open full lead page** / **View on the pipeline board** → the same contact, same data, elsewhere in
+   the app.
+3. **Reset demo data** → confirm the list goes back to empty. Only `demo-live`-tagged contacts are ever
+   touched.
+
+### 14d. Admin login
+
+```bash
+# Add to .env.local, then restart the dev server:
+echo 'ADMIN_PASSWORD=change-me-please' >> .env.local
+```
+
+1. Any page (e.g. `/dashboard`) now redirects to `/login`.
+2. Try a wrong password → redirected back with an error (fast — this is the form that was specifically
+   designed to always redirect, never hang, even on failure).
+3. Correct password → in, with a **Log out** link at the bottom of the sidebar.
+4. `curl -X POST http://localhost:3000/api/webhooks/contacts -d '{}'` → still reachable (401 for a bad
+   signature, not a redirect to `/login`) — webhooks are gated by their own signature check, not this.
+
+Remove (or comment out) `ADMIN_PASSWORD` in `.env.local` and restart the dev server afterward to go
+back to open local dev.
+
+### 14e. Real browser tests
+
+```bash
+npm run e2e
+```
+
+Runs 5 Playwright tests against the actual dev server and database: Kanban drag-and-drop (real mouse
+events, not a synthetic drop), the contact intake form, Failed Automations' Retry Now, and the demo
+page (create + reset). Each test creates its own uniquely-named data and cleans up after itself.
+
+## 15. Reset before an interview
 
 ```bash
 npm run db:seed        # restores the exact demo dataset
